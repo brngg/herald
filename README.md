@@ -68,9 +68,9 @@ HERALD is evaluated against scripted incident scenarios:
 
 ## Project Status
 
-- [ ] Phase 1 — Environment: Google Online Boutique on minikube
-- [ ] Phase 2 — Observability: Prometheus + Grafana + Alertmanager
-- [ ] Phase 3 — Chaos: Chaos Mesh incident scenarios
+- [x] Phase 1 — Environment: Google Online Boutique on minikube
+- [x] Phase 2 — Observability: Prometheus + Grafana + Alertmanager
+- [x] Phase 3 — Chaos: Chaos Mesh incident scenarios
 - [ ] Phase 4 — Fixer Agent: LangGraph diagnosis + confidence scoring
 - [ ] Phase 5 — Judge Layer: LLM safety evaluation + Langfuse tracing
 - [ ] Phase 6 — Temporal Workflows: execution + pre/post checks + rollback

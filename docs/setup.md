@@ -7,20 +7,24 @@
 
 ## Start the cluster
 ```bash
-minikube start --driver=docker
+./scripts/start_minikube.sh
 ```
 
 ## Deploy Google Online Boutique
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/microservices-demo/main/release/kubernetes-manifests.yaml
+./scripts/deploy_boutique.sh
 ```
 
 ## Verify pods are running
 ```bash
-kubectl get pods
+./scripts/check_cluster.sh
 ```
 
 ## Access the frontend
 ```bash
 minikube service frontend-external
 ```
+
+## Notes
+- `scripts/deploy_boutique.sh` applies the upstream Google Online Boutique manifest from GitHub.
+- If you want to use a different manifest source, set `BOUTIQUE_MANIFEST_URL` before running the deploy script.

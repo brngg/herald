@@ -1,0 +1,25 @@
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: AlertmanagerConfig
+metadata:
+  name: herald-webhook-routing
+  namespace: default
+spec:
+  route:
+    groupBy:
+      - alertname
+      - incident_class
+      - namespace
+    groupWait: 10s
+    groupInterval: 30s
+    repeatInterval: 4h
+    receiver: herald-webhook
+    matchers:
+      - name: herald
+        value: "true"
+        matchType: "="
+  receivers:
+    - name: herald-webhook
+      webhookConfigs:
+        - url: http://herald-webhook-receiver.monitoring.svc.cluster.local:8080/alerts
+          sendResolved: true
+          maxAlerts: 0

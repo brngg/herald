@@ -43,6 +43,7 @@ spec:
             severity: critical
             herald: "true"
             incident_class: bad_config
+            namespace: default
           annotations:
             summary: "frontend /cart probe is failing"
             description: "The synthetic /cart probe is failing. This is the primary user-facing alert for the bad frontend cart config scenario and may also fire during severe cart dependency failures."

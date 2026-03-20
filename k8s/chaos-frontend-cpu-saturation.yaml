@@ -1,16 +1,17 @@
 apiVersion: chaos-mesh.org/v1alpha1
-kind: NetworkChaos
+kind: StressChaos
 metadata:
-  name: network-latency
+  name: frontend-cpu-saturation
   namespace: default
 spec:
-  action: delay
-  mode: one
+  mode: all
   selector:
     namespaces:
       - default
     labelSelectors:
       app: frontend
-  delay:
-    latency: 500ms
-    jitter: 100ms
+  stressors:
+    cpu:
+      workers: 1
+      load: 95
+  duration: "10m"

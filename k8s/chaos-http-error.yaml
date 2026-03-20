@@ -1,16 +1,18 @@
 apiVersion: chaos-mesh.org/v1alpha1
 kind: HTTPChaos
 metadata:
-  name: http-error
+  name: frontend-cart-http-abort
   namespace: default
 spec:
-  mode: one
+  mode: all
   selector:
     namespaces:
       - default
     labelSelectors:
       app: frontend
-  target: Response
+  target: Request
   port: 8080
-  path: "*"
+  method: GET
+  path: /cart
   abort: true
+  duration: "10m"

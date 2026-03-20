@@ -59,10 +59,18 @@ HERALD is evaluated against scripted incident scenarios:
 
 | Scenario | Failure Type |
 |---|---|
-| Pod crash loop | CrashLoopBackOff |
-| Memory spike | OOMKilled |
-| High error rate | 500s on service |
-| Service latency | p99 > threshold |
+| Bad deployment crash loop | CrashLoopBackOff on `cartservice` |
+| CPU saturation | High CPU / response-time degradation on `frontend` |
+| Frontend HTTP fault | App-layer scenario still under revision |
+| Dependency network disruption | Network partition from `frontend` to `cartservice` |
+
+Live-verified today:
+- `crashloop-cartservice-bad-deploy.yaml`
+- `chaos-frontend-cpu-saturation.yaml`
+- `chaos-cartservice-network-partition.yaml`
+
+Still under revision:
+- `chaos-http-error.yaml` injects successfully, but it has not yet produced a reliable user-visible storefront failure.
 
 ---
 

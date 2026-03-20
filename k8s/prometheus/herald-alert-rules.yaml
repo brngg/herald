@@ -1,0 +1,60 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: herald-alert-rules
+  namespace: monitoring
+  labels:
+    app: kube-prometheus-stack
+    release: monitoring
+spec:
+  groups:
+    - name: herald.rules
+      rules:
+
+        # 1. CrashLoop - bad cartservice deployment
+        - alert: HeraldCartserviceCrashLoopBackOff
+          expr: max by (namespace, pod, container) (kube_pod_container_status_waiting_reason{reason="CrashLoopBackOff", namespace="default", pod=~"cartservice.*"}) == 1
+          for: 2m
+          labels:
+            severity: critical
+            herald: "true"
+            incident_class: crashloop
+          annotations:
+            summary: "cartservice is in CrashLoopBackOff"
+            description: "Pod {{ $labels.pod }} is crash looping in namespace {{ $labels.namespace }}. Likely a bad deployment rollout."
+
+        # 2. Frontend CPU saturation
+        - alert: HeraldFrontendHighCPU
+          expr: sum by (namespace, pod) (rate(container_cpu_usage_seconds_total{namespace="default", pod=~"frontend.*", container="server"}[5m])) > 0.05
+          for: 2m
+          labels:
+            severity: warning
+            herald: "true"
+            incident_class: cpu_saturation
+          annotations:
+            summary: "frontend pod is experiencing high CPU"
+            description: "Pod {{ $labels.pod }} CPU usage is above 50 millicores, indicating saturation from chaos injection."
+
+        # 3. Bad frontend cart config /cart probe failure
+        - alert: HeraldFrontendCartProbeFailed
+          expr: probe_success{instance="http://frontend.default.svc.cluster.local/cart"} == 0
+          for: 2m
+          labels:
+            severity: critical
+            herald: "true"
+            incident_class: bad_config
+          annotations:
+            summary: "frontend /cart probe is failing"
+            description: "The synthetic /cart probe is failing. This is the primary user-facing alert for the bad frontend cart config scenario and may also fire during severe cart dependency failures."
+
+        # 4. Cartservice network partition heuristic
+        - alert: HeraldCartserviceDependencyFailure
+          expr: sum by (namespace, pod) (rate(container_network_receive_bytes_total{namespace="default", pod=~"cartservice.*", interface="eth0"}[5m])) < 100
+          for: 2m
+          labels:
+            severity: critical
+            herald: "true"
+            incident_class: network_partition
+          annotations:
+            summary: "cartservice network traffic is near zero"
+            description: "Pod {{ $labels.pod }} is receiving near-zero traffic on eth0. This is a heuristic signal for frontend-to-cartservice dependency failure or partition."

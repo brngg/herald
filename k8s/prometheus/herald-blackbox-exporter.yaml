@@ -1,0 +1,87 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: herald-blackbox-exporter-config
+  namespace: monitoring
+  labels:
+    app: herald-blackbox-exporter
+    release: monitoring
+data:
+  blackbox.yml: |
+    modules:
+      http_2xx:
+        prober: http
+        timeout: 5s
+        http:
+          preferred_ip_protocol: ip4
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: herald-blackbox-exporter
+  namespace: monitoring
+  labels:
+    app: herald-blackbox-exporter
+    release: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: herald-blackbox-exporter
+  template:
+    metadata:
+      labels:
+        app: herald-blackbox-exporter
+        release: monitoring
+    spec:
+      containers:
+        - name: blackbox-exporter
+          image: quay.io/prometheus/blackbox-exporter:v0.27.0
+          args:
+            - --config.file=/etc/blackbox_exporter/blackbox.yml
+            - --web.listen-address=:19115
+          ports:
+            - containerPort: 19115
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/blackbox_exporter
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 50m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+      volumes:
+        - name: config
+          configMap:
+            name: herald-blackbox-exporter-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: herald-blackbox-exporter
+  namespace: monitoring
+  labels:
+    app: herald-blackbox-exporter
+    release: monitoring
+spec:
+  selector:
+    app: herald-blackbox-exporter
+  ports:
+    - name: http
+      port: 19115
+      targetPort: http

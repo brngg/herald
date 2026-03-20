@@ -61,16 +61,14 @@ HERALD is evaluated against scripted incident scenarios:
 |---|---|
 | Bad deployment crash loop | CrashLoopBackOff on `cartservice` |
 | CPU saturation | High CPU / response-time degradation on `frontend` |
-| Frontend HTTP fault | App-layer scenario still under revision |
+| Frontend bad cart config | User-facing HTTP failures from a bad `CART_SERVICE_ADDR` config |
 | Dependency network disruption | Network partition from `frontend` to `cartservice` |
 
 Live-verified today:
 - `crashloop-cartservice-bad-deploy.yaml`
 - `chaos-frontend-cpu-saturation.yaml`
 - `chaos-cartservice-network-partition.yaml`
-
-Still under revision:
-- `chaos-http-error.yaml` injects successfully, but it has not yet produced a reliable user-visible storefront failure.
+- `frontend-bad-cart-config.yaml` should keep the frontend process healthy while making `/cart` return deterministic user-visible errors.
 
 ---
 

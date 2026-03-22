@@ -64,15 +64,18 @@ HERALD is evaluated against scripted incident scenarios:
 | Frontend bad cart config | User-facing HTTP failures from a bad `CART_SERVICE_ADDR` config |
 | Dependency network disruption | Network partition from `frontend` to `cartservice` |
 
-Live-verified today:
+Live-verified:
 - `crashloop-cartservice-bad-deploy.yaml`
 - `chaos-frontend-cpu-saturation.yaml`
 - `chaos-cartservice-network-partition.yaml`
+
+“Pending final live verification:”
 - `frontend-bad-cart-config.yaml` should keep the frontend process healthy while making `/cart` return deterministic user-visible errors.
 
 ---
 
 ## Project Status
+“Current implementation is strongest in local environment setup, alert generation/routing, and Alertmanager-to-Incident ingestion. Fixer, Judge, HITL Gate, execution workflow, and evaluation harness are not yet implemented.”
 
 - [x] Phase 1 — Environment: Google Online Boutique on minikube
 - [x] Phase 2 — Observability: Prometheus + Grafana + Alertmanager

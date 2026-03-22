@@ -21,7 +21,11 @@ echo "Applying Google Online Boutique manifests..."
 kubectl apply -f "$MANIFEST_URL"
 
 echo "Waiting for Online Boutique deployments to roll out..."
-mapfile -t deployments < <(kubectl get deployments -n default -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+deployments=()
+while IFS= read -r deployment; do
+  [[ -n "$deployment" ]] || continue
+  deployments+=("$deployment")
+done < <(kubectl get deployments -n default -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
 
 if [[ "${#deployments[@]}" -eq 0 ]]; then
   echo "Error: no deployments were found in the default namespace after apply." >&2

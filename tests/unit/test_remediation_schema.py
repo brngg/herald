@@ -71,6 +71,55 @@ class RemediationActionSchemaTest(unittest.TestCase):
                 parameters={},
             )
 
+    def test_rejects_rollout_action_without_namespace(self) -> None:
+        with self.assertRaises(TypeError):
+            RemediationAction(
+                action_id="restart-cartservice",
+                action_type="rollout_restart_deployment",
+                description="Restart cartservice deployment",
+                confidence_score=0.8,
+                blast_radius_score=0.3,
+                requires_approval=True,
+                parameters={"deployment": "cartservice"},
+            )
+
+    def test_rejects_rollout_action_without_deployment(self) -> None:
+        with self.assertRaises(TypeError):
+            RemediationAction(
+                action_id="undo-cartservice",
+                action_type="rollout_undo_deployment",
+                description="Undo cartservice deployment",
+                confidence_score=0.8,
+                blast_radius_score=0.3,
+                requires_approval=True,
+                parameters={"namespace": "default"},
+            )
+
+    def test_rejects_escalate_action_without_reason(self) -> None:
+        with self.assertRaises(TypeError):
+            RemediationAction(
+                action_id="escalate-cartservice",
+                action_type="escalate",
+                description="Escalate to a human operator",
+                confidence_score=0.6,
+                blast_radius_score=0.1,
+                requires_approval=True,
+                parameters={},
+            )
+
+    def test_accepts_escalate_action_with_reason(self) -> None:
+        action = RemediationAction(
+            action_id="escalate-cartservice",
+            action_type="escalate",
+            description="Escalate to a human operator",
+            confidence_score=0.6,
+            blast_radius_score=0.1,
+            requires_approval=True,
+            parameters={"reason": "Automated remediation failed."},
+        )
+
+        self.assertEqual(action.parameters["reason"], "Automated remediation failed.")
+
 
 if __name__ == "__main__":
     unittest.main()

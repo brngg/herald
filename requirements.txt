@@ -1,0 +1,18 @@
+fastapi
+uvicorn[standard]
+httpx
+kubernetes
+structlog
+tenacity
+python-dotenv
+temporalio
+slack_sdk
+
+# Agent + LLM
+langgraph
+langfuse
+openai
+anthropic
+
+# Test/dev
+pytest

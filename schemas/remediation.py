@@ -58,7 +58,30 @@ class RemediationAction:
             raise TypeError("parameters must be a dict")
         self.confidence_score = float(self.confidence_score)
         self.blast_radius_score = float(self.blast_radius_score)
+        self._validate_action_parameters()
+
+    def _validate_action_parameters(self) -> None:
+        if self.action_type in ("rollout_undo_deployment", "rollout_restart_deployment"):
+            _require_non_empty_string(self.parameters, "namespace", self.action_type)
+            _require_non_empty_string(self.parameters, "deployment", self.action_type)
+            return
+
+        if self.action_type == "escalate":
+            _require_non_empty_string(self.parameters, "reason", self.action_type)
+            return
 
 
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _require_non_empty_string(
+    parameters: dict[str, Any],
+    key: str,
+    action_type: ActionTypes,
+) -> None:
+    value = parameters.get(key)
+    if not isinstance(value, str):
+        raise TypeError(f"{action_type} parameters must include string {key!r}")
+    if not value:
+        raise ValueError(f"{action_type} parameters must include non-empty {key!r}")

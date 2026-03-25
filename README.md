@@ -84,10 +84,11 @@ Current implementation is strongest in:
 - Alertmanager-to-`Incident` ingestion
 - Fixer schema contracts and local CLI testing
 - live Gemini-backed Fixer plan generation for the `crashloop` slice
+- Judge contract, safety checks, and Gemini comparison path for the `crashloop` slice
 
 Still not implemented end to end:
 
-- Judge verdicting
+- Judge-to-HITL integration
 - HITL Gate routing
 - execution workflow
 - Kubernetes action execution
@@ -100,7 +101,7 @@ Progress by phase:
 - [x] Phase 2: Observability with Prometheus, Grafana, and Alertmanager
 - [x] Phase 3: Chaos scenario setup
 - [ ] Phase 4: Fixer Agent vertical slice beyond plan generation
-- [ ] Phase 5: Judge layer
+- [ ] Phase 5: Judge layer beyond heuristic crashloop gating
 - [ ] Phase 6: Recovery workflow with pre-check and post-check
 - [ ] Phase 7: HITL and Slack integration
 
@@ -159,4 +160,75 @@ incident context and full evidence for local debugging only:
 python -m agents.fixer \
   --payload-file /tmp/herald-crashloop-payload.json \
   --include-debug-context
+```
+
+---
+
+## Judge Smoke Test
+
+The current Judge runs as a direct Python pipeline call after Fixer output. The
+heuristic Judge remains authoritative, and a Gemini Judge provider can be injected
+for comparison without bypassing the local safety policy.
+
+Heuristic Fixer -> heuristic Judge:
+
+```bash
+./.venv/bin/python - <<'PY'
+import json
+from agents.fixer import run_fixer_for_alertmanager_payload
+from agents.judge import run_judge_pipeline
+
+with open('/tmp/herald-crashloop-payload.json', 'r', encoding='utf-8') as f:
+    payload = json.load(f)
+
+fixer_results = run_fixer_for_alertmanager_payload(payload, llm=None)
+result = fixer_results[0]
+
+judge_state = run_judge_pipeline(
+    incident=result["incident"],
+    evidence=result["evidence"],
+    incident_summary=result["incident_summary"],
+    actions=result["actions"],
+    fixer_rationale=result.get("fixer_rationale"),
+    llm=None,
+)
+
+print(judge_state["judge_verdict"])
+print(judge_state["judge_reason"])
+PY
+```
+
+Gemini Fixer -> Gemini Judge:
+
+```bash
+export GEMINI_API_KEY=your_key_here
+
+./.venv/bin/python - <<'PY'
+import json
+from agents.fixer import run_fixer_for_alertmanager_payload
+from agents.judge import run_judge_pipeline
+from services.gemini_fixer_llm import GeminiFixerLLM
+from services.gemini_judge_llm import GeminiJudgeLLM
+
+with open('/tmp/herald-crashloop-payload.json', 'r', encoding='utf-8') as f:
+    payload = json.load(f)
+
+fixer_results = run_fixer_for_alertmanager_payload(
+    payload,
+    llm=GeminiFixerLLM(model="gemini-2.5-flash"),
+)
+result = fixer_results[0]
+
+judge_state = run_judge_pipeline(
+    incident=result["incident"],
+    evidence=result["evidence"],
+    incident_summary=result["incident_summary"],
+    actions=result["actions"],
+    fixer_rationale=result.get("fixer_rationale"),
+    llm=GeminiJudgeLLM(model="gemini-2.5-flash"),
+)
+
+print(judge_state["judge_verdict"])
+print(judge_state["judge_reason"])
+PY
 ```

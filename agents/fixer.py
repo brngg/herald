@@ -8,6 +8,7 @@ from typing import Any, NotRequired, TypedDict
 from schemas.incident import Incident
 from schemas.remediation import RemediationAction
 from services.fixer_llm import FixerLLM, FixerLLMResult
+from services.incident_normalization import normalize_incident_class
 
 
 class FixerAgentState(TypedDict):
@@ -41,23 +42,6 @@ def initial_fixer_state(incident: Incident) -> FixerAgentState:
         "errors": [],
         "final": False,
     }
-
-
-def _normalize_incident_class(value: str) -> str:
-    """Normalize incident_class values into canonical labels used by HERALD rules."""
-
-    normalized = value.strip().lower()
-    if normalized in {"crashloop", "cpu_saturation", "bad_config", "network_partition"}:
-        return normalized
-    if "crashloop" in normalized:
-        return "crashloop"
-    if "cpu" in normalized:
-        return "cpu_saturation"
-    if "config" in normalized:
-        return "bad_config"
-    if "partition" in normalized or "dependency" in normalized:
-        return "network_partition"
-    return normalized
 
 
 def _infer_deployment_from_labels(labels: dict[str, Any]) -> str | None:
@@ -105,7 +89,7 @@ def extract_evidence_node(state: FixerAgentState) -> dict[str, Any]:
         {
             "incident_id": incident.incident_id,
             "incident_class": incident_class,
-            "incident_class_normalized": _normalize_incident_class(incident_class),
+            "incident_class_normalized": normalize_incident_class(incident_class),
             "labels": labels,
             "annotations": annotations,
             # First-class fields for easier downstream consumption.
@@ -141,7 +125,7 @@ def propose_actions_node(state: FixerAgentState) -> dict[str, Any]:
     alertname = str(evidence.get("alertname") or "")
     namespace = str(evidence.get("namespace") or "default")
     incident_class_raw = str(evidence.get("incident_class") or "")
-    incident_class = _normalize_incident_class(incident_class_raw)
+    incident_class = normalize_incident_class(incident_class_raw)
 
     actions: list[RemediationAction] = []
     errors = list(state.get("errors", []))

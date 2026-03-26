@@ -1,0 +1,43 @@
+{
+  "receiver": "default/herald-webhook-routing/herald-webhook",
+  "status": "firing",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HeraldCartserviceCrashLoopBackOff",
+        "incident_class": "crashloop",
+        "namespace": "default",
+        "pod": "cartservice-7d6b9f5bb4-abcde",
+        "container": "server",
+        "severity": "critical"
+      },
+      "annotations": {
+        "summary": "cartservice is in CrashLoopBackOff",
+        "description": "Pod cartservice is crash looping."
+      },
+      "startsAt": "2026-03-23T20:00:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus/graph",
+      "fingerprint": "crashloop123"
+    }
+  ],
+  "groupLabels": {
+    "alertname": "HeraldCartserviceCrashLoopBackOff",
+    "incident_class": "crashloop",
+    "namespace": "default"
+  },
+  "commonLabels": {
+    "alertname": "HeraldCartserviceCrashLoopBackOff",
+    "incident_class": "crashloop",
+    "namespace": "default",
+    "severity": "critical"
+  },
+  "commonAnnotations": {
+    "summary": "cartservice is in CrashLoopBackOff"
+  },
+  "externalURL": "http://alertmanager",
+  "version": "4",
+  "groupKey": "{}/{namespace=\"default\"}:{alertname=\"HeraldCartserviceCrashLoopBackOff\"}",
+  "truncatedAlerts": 0
+}

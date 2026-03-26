@@ -85,24 +85,27 @@ Current implementation is strongest in:
 - Fixer schema contracts and local CLI testing
 - live Gemini-backed Fixer plan generation for the `crashloop` slice
 - Judge contract, safety checks, and Gemini comparison path for the `crashloop` slice
+- HITL Gate routing and `DecisionTrace` assembly for the `crashloop` slice
+- bounded crashloop execution via `kubectl rollout undo|restart`
+- pre-check and post-check verification for the `crashloop` slice
+- an in-process crashloop recovery workflow entrypoint
 
 Still not implemented end to end:
 
-- Judge-to-HITL integration
-- HITL Gate routing
-- execution workflow
-- Kubernetes action execution
-- post-check verification and rollback
+- rollback behavior
+- durable workflow orchestration
+- Slack-based approval flow
 - evaluation harness
+- the other three incident classes
 
 Progress by phase:
 
 - [x] Phase 1: Environment on minikube
 - [x] Phase 2: Observability with Prometheus, Grafana, and Alertmanager
 - [x] Phase 3: Chaos scenario setup
-- [ ] Phase 4: Fixer Agent vertical slice beyond plan generation
-- [ ] Phase 5: Judge layer beyond heuristic crashloop gating
-- [ ] Phase 6: Recovery workflow with pre-check and post-check
+- [x] Phase 4: Fixer Agent vertical slice beyond plan generation
+- [x] Phase 5: Judge layer beyond heuristic crashloop gating
+- [x] Phase 6: Recovery workflow with pre-check and post-check
 - [ ] Phase 7: HITL and Slack integration
 
 ---
@@ -197,6 +200,102 @@ print(judge_state["judge_verdict"])
 print(judge_state["judge_reason"])
 PY
 ```
+
+---
+
+## Crashloop Recovery Demo
+
+The repo now includes an in-process recovery workflow for the `CrashLoopBackOff`
+vertical slice on `cartservice`. It runs:
+
+- Alertmanager payload ingestion
+- Fixer
+- Judge
+- HITL Gate routing
+- `DecisionTrace` assembly
+- pre-check verification
+- bounded execution for rollout undo or rollout restart
+- post-check verification
+
+### Prerequisites
+
+- Local cluster and observability stack are up
+- `kubectl` points at the correct cluster
+- Prometheus is reachable through `PROMETHEUS_BASE_URL` or `--prometheus-base-url`
+- The crashloop payload file exists at `payloads/crashloop_alert.json`
+
+### Step 1: Run Without Approval
+
+This first run shows the proposed remediation, Judge result, HITL routing, and
+pending `DecisionTrace`, but does not execute anything:
+
+```bash
+./.venv/bin/python -m workflows.recovery_workflow \
+  --payload-file payloads/crashloop_alert.json \
+  --prometheus-base-url http://localhost:9090
+```
+
+What to look for:
+
+- `hitl_decision.routing_decision`
+- `hitl_decision.recommended_action`
+- `decision_trace.human_approval` should be `n/a`
+- `decision_trace.final_state` should be `pending_approval`
+
+### Step 2: Run With Explicit Approval
+
+Copy the `action_id` from `hitl_decision.recommended_action` in the first run and
+pass it back with `--approve-action-id`. On the default heuristic path, the
+recommended action is typically `rollout_undo_cartservice`.
+
+This second run approves the selected action and allows the workflow to execute
+the bounded crashloop remediation:
+
+```bash
+./.venv/bin/python -m workflows.recovery_workflow \
+  --payload-file payloads/crashloop_alert.json \
+  --approve-action-id rollout_undo_cartservice \
+  --prometheus-base-url http://localhost:9090
+```
+
+What to look for:
+
+- `decision_trace.human_approval` should be `approved`
+- `decision_trace.execution_result`
+- `decision_trace.verification_result.pre_check`
+- `decision_trace.verification_result.post_check`
+- `decision_trace.final_state` should end as `recovered` or `unrecovered`
+
+### Optional Gemini Comparison
+
+The workflow defaults to heuristic Fixer and heuristic Judge. To compare hosted
+Gemini-backed planning and verdicting:
+
+```bash
+export GEMINI_API_KEY=your_key_here
+
+./.venv/bin/python -m workflows.recovery_workflow \
+  --payload-file payloads/crashloop_alert.json \
+  --prometheus-base-url http://localhost:9090 \
+  --fixer-provider gemini \
+  --judge-provider gemini
+```
+
+You can also override models explicitly:
+
+```bash
+./.venv/bin/python -m workflows.recovery_workflow \
+  --payload-file payloads/crashloop_alert.json \
+  --prometheus-base-url http://localhost:9090 \
+  --fixer-provider gemini \
+  --judge-provider gemini \
+  --fixer-model gemini-2.5-flash \
+  --judge-model gemini-2.5-flash
+```
+
+When using Gemini, action ordering, scores, and `action_id` values can vary. Run
+the workflow once without approval, copy the recommended `action_id`, then rerun
+with `--approve-action-id`.
 
 Gemini Fixer -> Gemini Judge:
 

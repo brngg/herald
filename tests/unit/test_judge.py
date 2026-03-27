@@ -96,6 +96,7 @@ class JudgeTest(unittest.TestCase):
 
         self.assertEqual(state["judge_verdict"], "pass")
         self.assertTrue(state["final"])
+        self.assertNotIn("judge_llm_reason", state)
 
     def test_judge_fails_when_no_actions_are_proposed(self) -> None:
         state = run_judge_pipeline(
@@ -266,6 +267,7 @@ class JudgeTest(unittest.TestCase):
         self.assertEqual(state["judge_verdict"], "pass")
         self.assertEqual(len(llm.seen_actions), 2)
         self.assertTrue(llm.seen_summary)
+        self.assertEqual(state["judge_llm_reason"], "LLM-approved plan.")
 
     def test_judge_llm_cannot_bypass_heuristic_fail(self) -> None:
         class PermissiveJudgeLLM:
@@ -322,6 +324,40 @@ class JudgeTest(unittest.TestCase):
 
         self.assertEqual(state["judge_verdict"], "fail")
         self.assertEqual(state["judge_reason"], "LLM rejected the plan.")
+        self.assertEqual(state["judge_llm_reason"], "LLM rejected the plan.")
+
+    def test_judge_preserves_llm_reason_when_heuristic_passes(self) -> None:
+        class SupportiveJudgeLLM:
+            def evaluate(
+                self,
+                *,
+                incident_summary: str,
+                evidence: dict[str, object],
+                actions: list[RemediationAction],
+                fixer_rationale: str | None,
+            ) -> JudgeLLMResult:
+                return JudgeLLMResult(
+                    verdict="pass",
+                    reason="Rollback is the best bounded option for this crashloop incident.",
+                )
+
+        state = run_judge_pipeline(
+            incident=_crashloop_incident(),
+            evidence=_crashloop_evidence(),
+            incident_summary="[critical] crashloop",
+            actions=_crashloop_actions(),
+            llm=SupportiveJudgeLLM(),
+        )
+
+        self.assertEqual(state["judge_verdict"], "pass")
+        self.assertEqual(
+            state["judge_reason"],
+            "Crashloop plan is bounded, reversible, approval-gated, and limited to supported v0 remediation actions.",
+        )
+        self.assertEqual(
+            state["judge_llm_reason"],
+            "Rollback is the best bounded option for this crashloop incident.",
+        )
 
     def test_judge_falls_back_when_llm_raises(self) -> None:
         class FailingJudgeLLM:

@@ -24,6 +24,7 @@ class JudgeAgentState(TypedDict):
     final: bool
 
     fixer_rationale: NotRequired[str]
+    judge_llm_reason: NotRequired[str]
 
 
 def initial_judge_state(
@@ -169,10 +170,16 @@ def make_llm_evaluate_node(llm: JudgeLLM) -> Any:
                 fixer_rationale=state.get("fixer_rationale"),
             )
             if result.verdict == "fail":
-                return {"judge_verdict": result.verdict, "judge_reason": result.reason, "errors": errors}
+                return {
+                    "judge_verdict": result.verdict,
+                    "judge_reason": result.reason,
+                    "judge_llm_reason": result.reason,
+                    "errors": errors,
+                }
             return {
                 "judge_verdict": heuristic["judge_verdict"],
                 "judge_reason": heuristic["judge_reason"],
+                "judge_llm_reason": result.reason,
                 "errors": errors,
             }
         except Exception as exc:

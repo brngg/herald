@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import json
 import unittest
 from pathlib import Path
 
@@ -28,6 +29,10 @@ class RunScenarioIntegrationTest(unittest.TestCase):
             self.assertTrue((Path(temp_dir) / "crashloop_worker_failure-run-01.json").exists())
             self.assertTrue((Path(temp_dir) / "metrics-summary.json").exists())
             self.assertTrue((Path(temp_dir) / "metrics-summary.md").exists())
+            with (Path(temp_dir) / "crashloop_recovered-run-01.json").open("r", encoding="utf-8") as handle:
+                artifact = json.load(handle)
+            self.assertIn("decision_trace_timeline", artifact["result"])
+            self.assertEqual(artifact["result"]["decision_trace_timeline"][0]["node_name"], "fixer")
 
 
 if __name__ == "__main__":

@@ -9,7 +9,10 @@ from services.execution_worker import ExecutionWorkerClient
 from services.kubernetes_client import KubernetesClient
 from services.judge_llm import JudgeLLMResult
 from services.prometheus_client import PrometheusClient
-from workflows.recovery_workflow import run_crashloop_recovery_from_payload
+from workflows.recovery_workflow import (
+    run_crashloop_recovery_from_payload,
+    run_crashloop_recovery_from_saved_plan,
+)
 
 
 def _crashloop_payload() -> dict[str, object]:
@@ -106,6 +109,11 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(trace.final_state, "pending_approval")
         self.assertEqual(trace.execution_result, {})
         self.assertEqual(trace.verification_result, {})
+        self.assertEqual(set(trace.node_runs_by_node.keys()), {"fixer", "judge", "hitl_gate"})
+        self.assertEqual(
+            [item["node_name"] for item in result["decision_trace_timeline"]],
+            ["fixer", "judge", "hitl_gate"],
+        )
 
     def test_workflow_executes_approved_restart_and_marks_recovered(self) -> None:
         commands: list[list[str]] = []
@@ -158,6 +166,17 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
             "Agent completed the approved remediation.",
         )
         self.assertEqual(
+            trace.node_runs_by_node["execution_worker"][trace.latest_run_id_by_node["execution_worker"]]["summary"],
+            "Execution worker completed the approved remediation action.",
+        )
+        execution_worker_explanation = trace.node_runs_by_node["execution_worker"][
+            trace.latest_run_id_by_node["execution_worker"]
+        ]["llm_explanation"]
+        self.assertIn("Agent completed the approved remediation.", execution_worker_explanation)
+        self.assertIn("The Gemini execution agent handled approved action 'rollout_undo_cartservice'", execution_worker_explanation)
+        self.assertIn("It used the bounded tools rollout_undo_deployment before finishing.", execution_worker_explanation)
+        self.assertIn("The approved action succeeded with return code 0.", execution_worker_explanation)
+        self.assertEqual(
             trace.execution_result["tool_transcript"][0]["tool_name"],
             "rollout_undo_deployment",
         )
@@ -167,6 +186,12 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(trace.verification_result["post_check"]["attempts"], 6)
         self.assertEqual(trace.final_state, "recovered")
         self.assertFalse(trace.rollback_triggered)
+        self.assertTrue(
+            {"human_approval", "pre_check", "execution_worker", "rollout_wait", "post_check", "finalization"}.issubset(
+                set(trace.node_runs_by_node.keys())
+            )
+        )
+        self.assertEqual(result["decision_trace_timeline"][-1]["node_name"], "finalization")
         self.assertEqual(
             commands,
             [["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=300s"]],
@@ -218,6 +243,48 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertTrue(trace.execution_result["worker_id"].startswith("worker-"))
         self.assertEqual(trace.execution_result["tool_transcript"][0]["tool_name"], "rollout_undo_deployment")
         self.assertEqual(trace.final_state, "recovered")
+        self.assertEqual(
+            commands,
+            [["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=300s"]],
+        )
+
+    def test_workflow_can_resume_from_saved_first_pass_without_rerunning_planning(self) -> None:
+        planning_result = run_crashloop_recovery_from_payload(_crashloop_payload())
+
+        commands: list[list[str]] = []
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout="ok",
+                stderr="",
+            )
+
+        crashloop_queries = iter([1.0, 0.0])
+
+        def query_runner(query: str) -> float:
+            if "kube_pod_container_status_waiting_reason" in query:
+                return next(crashloop_queries)
+            if "kube_pod_status_ready" in query:
+                return 1.0
+            raise AssertionError(f"Unexpected query: {query}")
+
+        result = run_crashloop_recovery_from_saved_plan(
+            _crashloop_payload(),
+            planning_result,
+            approve_action_id="rollout_undo_cartservice",
+            kubernetes_client=KubernetesClient(runner=runner),
+            prometheus_client=PrometheusClient(query_runner=query_runner),
+            execution_worker_client=_worker_client(),
+        )
+
+        trace = result["decision_trace"]
+        self.assertEqual(trace.final_state, "recovered")
+        self.assertEqual(trace.node_runs_by_node["fixer"]["fixer:0001"]["attempt"], 1)
+        self.assertEqual(trace.node_runs_by_node["judge"]["judge:0002"]["attempt"], 1)
+        self.assertEqual(result["decision_trace_timeline"][0]["node_name"], "fixer")
         self.assertEqual(
             commands,
             [["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=300s"]],
@@ -399,6 +466,71 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(trace.verification_result["status"], "not_run")
         self.assertEqual(trace.final_state, "rejected")
         self.assertFalse(trace.rollback_triggered)
+        self.assertIn("human_approval", trace.node_runs_by_node)
+        self.assertEqual(result["decision_trace_timeline"][-1]["status"], "rejected")
+
+    def test_workflow_records_optional_llm_explanations_in_node_runs(self) -> None:
+        class StubFixerLLM:
+            def propose(self, *, incident_summary: str, evidence: dict[str, object]) -> object:
+                from services.fixer_llm import FixerLLMResult
+                from schemas.remediation import RemediationAction
+
+                return FixerLLMResult(
+                    rationale="Rollback is the safest first move because it is bounded and reversible.",
+                    actions=[
+                        RemediationAction(
+                            action_id="rollout_undo_cartservice",
+                            action_type="rollout_undo_deployment",
+                            description="Roll back cartservice Deployment to the previous ReplicaSet.",
+                            confidence_score=0.9,
+                            blast_radius_score=0.3,
+                            requires_approval=True,
+                            parameters={"namespace": "default", "deployment": "cartservice"},
+                        ),
+                        RemediationAction(
+                            action_id="restart_cartservice",
+                            action_type="rollout_restart_deployment",
+                            description="Restart cartservice Deployment to clear transient crashloop state.",
+                            confidence_score=0.5,
+                            blast_radius_score=0.2,
+                            requires_approval=True,
+                            parameters={"namespace": "default", "deployment": "cartservice"},
+                        ),
+                    ],
+                )
+
+        class StubJudgeLLM:
+            def evaluate(
+                self,
+                *,
+                incident_summary: str,
+                evidence: dict[str, object],
+                actions: list[object],
+                fixer_rationale: str | None,
+            ) -> JudgeLLMResult:
+                return JudgeLLMResult(
+                    verdict="pass",
+                    reason="The rollback recommendation stays within the approved blast-radius envelope.",
+                )
+
+        result = run_crashloop_recovery_from_payload(
+            _crashloop_payload(),
+            fixer_llm=StubFixerLLM(),
+            judge_llm=StubJudgeLLM(),
+        )
+
+        trace = result["decision_trace"]
+        fixer_run = trace.node_runs_by_node["fixer"][trace.latest_run_id_by_node["fixer"]]
+        judge_run = trace.node_runs_by_node["judge"][trace.latest_run_id_by_node["judge"]]
+
+        self.assertEqual(
+            fixer_run["llm_explanation"],
+            "Rollback is the safest first move because it is bounded and reversible.",
+        )
+        self.assertEqual(
+            judge_run["llm_explanation"],
+            "The rollback recommendation stays within the approved blast-radius envelope.",
+        )
 
     def test_workflow_triggers_bounded_rollback_after_restart_verification_failure(self) -> None:
         commands: list[list[str]] = []
@@ -456,6 +588,8 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(trace.verification_result["post_check"]["status"], "unrecovered")
         self.assertEqual(trace.verification_result["post_rollback_check"]["status"], "recovered")
         self.assertEqual(trace.final_state, "rolled_back")
+        self.assertIn("rollback", trace.node_runs_by_node)
+        self.assertEqual(result["decision_trace_timeline"][-1]["status"], "rolled_back")
         self.assertEqual(
             commands,
             [
@@ -484,6 +618,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(trace.execution_result["status"], "halted")
         self.assertEqual(trace.verification_result["status"], "not_run")
         self.assertFalse(result["hitl_decision"]["requires_approval"])
+        self.assertEqual(result["decision_trace_timeline"][-1]["status"], "escalated")
 
 
 if __name__ == "__main__":

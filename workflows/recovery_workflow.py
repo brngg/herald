@@ -13,6 +13,7 @@ from schemas.decision_trace import DecisionTrace
 from schemas.execution import ExecutionDispatch, ExecutionResult
 from schemas.remediation import RemediationAction
 from services.alertmanager_client import incidents_from_alertmanager_payload
+from services.decision_trace_provenance import append_node_run, derive_trace_timeline, initialize_trace_provenance
 from services.execution_worker import ExecutionWorkerClient
 from services.gemini_fixer_llm import GeminiFixerLLM
 from services.gemini_judge_llm import GeminiJudgeLLM
@@ -45,6 +46,78 @@ def run_crashloop_recovery_from_payload(
         raise ValueError("Crashloop recovery demo expects exactly one incident per payload.")
 
     incident = incidents[0]
+    fixer_state, judge_state, hitl_decision = _plan_crashloop_recovery(
+        incident=incident,
+        fixer_llm=fixer_llm,
+        judge_llm=judge_llm,
+    )
+    return _continue_crashloop_recovery(
+        incident=incident,
+        fixer_state=fixer_state,
+        judge_state=judge_state,
+        hitl_decision=hitl_decision,
+        approve_action_id=approve_action_id,
+        reject_action_id=reject_action_id,
+        kubernetes_client=kubernetes_client,
+        prometheus_client=prometheus_client,
+        execution_worker_client=execution_worker_client,
+    )
+
+
+def run_crashloop_recovery_from_saved_plan(
+    payload: dict[str, Any],
+    saved_result: dict[str, Any],
+    *,
+    approve_action_id: str | None = None,
+    reject_action_id: str | None = None,
+    kubernetes_client: KubernetesClient | None = None,
+    prometheus_client: PrometheusClient | None = None,
+    execution_worker_client: ExecutionWorkerClient | None = None,
+) -> dict[str, Any]:
+    if approve_action_id and reject_action_id:
+        raise ValueError("Specify either approve_action_id or reject_action_id, not both.")
+    if approve_action_id is None and reject_action_id is None:
+        raise ValueError("resume-from-file requires --approve-action-id or --reject-action-id.")
+
+    incidents = incidents_from_alertmanager_payload(payload)
+    if len(incidents) != 1:
+        raise ValueError("Crashloop recovery demo expects exactly one incident per payload.")
+    incident = incidents[0]
+
+    fixer_state = _saved_mapping(saved_result.get("fixer_state"), field_name="fixer_state")
+    judge_state = _saved_mapping(saved_result.get("judge_state"), field_name="judge_state")
+    hitl_decision_payload = _saved_mapping(saved_result.get("hitl_decision"), field_name="hitl_decision")
+    decision_trace_payload = _saved_mapping(saved_result.get("decision_trace"), field_name="decision_trace")
+
+    hitl_decision = HITLDecision(
+        routing_decision=str(hitl_decision_payload["routing_decision"]),
+        requires_approval=bool(hitl_decision_payload["requires_approval"]),
+        recommended_action=_remediation_action_from_saved(hitl_decision_payload.get("recommended_action")),
+        candidate_actions=[
+            _remediation_action_from_saved(action_payload)
+            for action_payload in list(hitl_decision_payload.get("candidate_actions", []))
+        ],
+        decision_trace=_decision_trace_from_saved(decision_trace_payload),
+    )
+    return _continue_crashloop_recovery(
+        incident=incident,
+        fixer_state=fixer_state,
+        judge_state=judge_state,
+        hitl_decision=hitl_decision,
+        approve_action_id=approve_action_id,
+        reject_action_id=reject_action_id,
+        kubernetes_client=kubernetes_client,
+        prometheus_client=prometheus_client,
+        execution_worker_client=execution_worker_client,
+    )
+
+
+def _plan_crashloop_recovery(
+    *,
+    incident: Any,
+    fixer_llm: Any = None,
+    judge_llm: Any = None,
+) -> tuple[dict[str, Any], dict[str, Any], HITLDecision]:
     fixer_state = run_fixer_pipeline(incident, llm=fixer_llm)
     judge_state = run_judge_pipeline(
         incident=incident,
@@ -61,6 +134,78 @@ def run_crashloop_recovery_from_payload(
         judge_verdict=judge_state["judge_verdict"],
         judge_reason=judge_state["judge_reason"],
     )
+    trace = initialize_trace_provenance(hitl_decision.decision_trace)
+    trace = append_node_run(
+        trace,
+        node_name="fixer",
+        status="succeeded",
+        summary="Fixer generated a bounded remediation plan.",
+        llm_explanation=_truncate_text(fixer_state.get("fixer_rationale")),
+        input_summary={
+            "incident_id": incident.incident_id,
+            "incident_class": incident.incident_class,
+        },
+        output_summary={
+            "incident_summary": fixer_state["incident_summary"],
+            "ranked_action_ids": [action.action_id for action in fixer_state["actions"]],
+            "fixer_rationale": _truncate_text(fixer_state.get("fixer_rationale") or ""),
+        },
+    )
+    trace = append_node_run(
+        trace,
+        node_name="judge",
+        status=str(judge_state["judge_verdict"]),
+        summary="Judge evaluated the Fixer plan against the safety rubric.",
+        llm_explanation=_truncate_text(judge_state.get("judge_llm_reason")),
+        input_summary={
+            "incident_id": incident.incident_id,
+            "candidate_action_ids": [action.action_id for action in fixer_state["actions"]],
+        },
+        output_summary={
+            "judge_verdict": judge_state["judge_verdict"],
+            "judge_reason": judge_state["judge_reason"],
+        },
+    )
+    trace = append_node_run(
+        trace,
+        node_name="hitl_gate",
+        status="succeeded",
+        summary="HITL Gate routed the plan according to confidence, blast radius, and Judge verdict.",
+        input_summary={
+            "judge_verdict": judge_state["judge_verdict"],
+            "candidate_action_ids": [action.action_id for action in hitl_decision.candidate_actions],
+        },
+        output_summary={
+            "routing_decision": hitl_decision.routing_decision,
+            "requires_approval": hitl_decision.requires_approval,
+            "recommended_action_id": (
+                hitl_decision.recommended_action.action_id if hitl_decision.recommended_action else None
+            ),
+            "candidate_action_ids": [action.action_id for action in hitl_decision.candidate_actions],
+        },
+    )
+    hitl_decision = HITLDecision(
+        routing_decision=hitl_decision.routing_decision,
+        requires_approval=hitl_decision.requires_approval,
+        recommended_action=hitl_decision.recommended_action,
+        candidate_actions=hitl_decision.candidate_actions,
+        decision_trace=trace,
+    )
+    return fixer_state, judge_state, hitl_decision
+
+
+def _continue_crashloop_recovery(
+    *,
+    incident: Any,
+    fixer_state: dict[str, Any],
+    judge_state: dict[str, Any],
+    hitl_decision: HITLDecision,
+    approve_action_id: str | None = None,
+    reject_action_id: str | None = None,
+    kubernetes_client: KubernetesClient | None = None,
+    prometheus_client: PrometheusClient | None = None,
+    execution_worker_client: ExecutionWorkerClient | None = None,
+) -> dict[str, Any]:
 
     if approve_action_id is None and reject_action_id is None:
         decision_trace = hitl_decision.decision_trace
@@ -77,6 +222,7 @@ def run_crashloop_recovery_from_payload(
                 },
                 final_state="escalated",
             )
+            decision_trace = _append_finalization_run(decision_trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -98,6 +244,7 @@ def run_crashloop_recovery_from_payload(
             },
             final_state="escalated",
         )
+        trace = _append_finalization_run(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -113,6 +260,20 @@ def run_crashloop_recovery_from_payload(
             human_approval="rejected",
             final_state="rejected",
         )
+        trace = append_node_run(
+            trace,
+            node_name="human_approval",
+            status="rejected",
+            summary="Human operator rejected the proposed remediation action.",
+            input_summary={
+                "action_id": rejected_action.action_id,
+                "action_type": rejected_action.action_type,
+            },
+            output_summary={
+                "human_approval": "rejected",
+                "selected_action_id": rejected_action.action_id,
+            },
+        )
         trace = finalize_decision_trace(
             trace,
             execution_result={
@@ -127,6 +288,7 @@ def run_crashloop_recovery_from_payload(
             },
             final_state="rejected",
         )
+        trace = _append_finalization_run(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -141,6 +303,20 @@ def run_crashloop_recovery_from_payload(
         human_approval="approved",
         final_state="executing",
     )
+    trace = append_node_run(
+        trace,
+        node_name="human_approval",
+        status="approved",
+        summary="Human operator approved the proposed remediation action.",
+        input_summary={
+            "action_id": approved_action.action_id,
+            "action_type": approved_action.action_type,
+        },
+        output_summary={
+            "human_approval": "approved",
+            "selected_action_id": approved_action.action_id,
+        },
+    )
 
     namespace = str(approved_action.parameters["namespace"])
     deployment = str(approved_action.parameters["deployment"])
@@ -149,6 +325,22 @@ def run_crashloop_recovery_from_payload(
     worker_client = execution_worker_client or ExecutionWorkerClient()
 
     pre_check = prometheus.pre_check_crashloop(namespace=namespace, deployment=deployment)
+    trace = append_node_run(
+        trace,
+        node_name="pre_check",
+        status=str(pre_check["status"]),
+        summary="Prometheus pre-check evaluated whether crashloop recovery should execute.",
+        input_summary={
+            "namespace": namespace,
+            "deployment": deployment,
+        },
+        output_summary={
+            "status": pre_check["status"],
+            "crashloop_count": pre_check["crashloop_count"],
+            "attempts": pre_check["attempts"],
+            "should_execute": pre_check["should_execute"],
+        },
+    )
     if not bool(pre_check["should_execute"]):
         verification_result = {
             "status": "recovered",
@@ -164,6 +356,7 @@ def run_crashloop_recovery_from_payload(
             verification_result=verification_result,
             final_state="recovered",
         )
+        trace = _append_finalization_run(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -180,6 +373,28 @@ def run_crashloop_recovery_from_payload(
         dispatch=dispatch,
         worker_result=worker_result,
     )
+    trace = append_node_run(
+        trace,
+        node_name="execution_worker",
+        status=str(worker_result.status),
+        summary=_execution_worker_summary(worker_result.status),
+        llm_explanation=_execution_worker_llm_explanation(
+            action=approved_action,
+            worker_result=worker_result,
+        ),
+        input_summary={
+            "worker_id": dispatch.worker_id,
+            "action_id": dispatch.action_id,
+            "action_type": dispatch.action_type,
+        },
+        output_summary={
+            "worker_id": worker_result.worker_id,
+            "status": worker_result.status,
+            "action_id": worker_result.action_id,
+            "returncode": worker_result.returncode,
+            "tool_names": [entry.get("tool_name") for entry in worker_result.tool_transcript],
+        },
+    )
     if execution_result["status"] != "succeeded":
         trace = finalize_decision_trace(
             trace,
@@ -193,6 +408,7 @@ def run_crashloop_recovery_from_payload(
             },
             final_state="escalated",
         )
+        trace = _append_finalization_run(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -206,6 +422,21 @@ def run_crashloop_recovery_from_payload(
         deployment=deployment,
     )
     rollout_status = execution_result["rollout_status"]
+    trace = append_node_run(
+        trace,
+        node_name="rollout_wait",
+        status=str(rollout_status["status"]),
+        summary="Kubernetes rollout status was checked after the approved remediation executed.",
+        input_summary={
+            "namespace": namespace,
+            "deployment": deployment,
+            "action_id": approved_action.action_id,
+        },
+        output_summary={
+            "status": rollout_status["status"],
+            "returncode": rollout_status["returncode"],
+        },
+    )
     if rollout_status["status"] != "succeeded":
         rollback_triggered, rollback_result, post_rollback_check = _attempt_bounded_rollback(
             action=approved_action,
@@ -217,6 +448,12 @@ def run_crashloop_recovery_from_payload(
         )
         if rollback_result is not None:
             execution_result["rollback"] = rollback_result
+            trace = _append_rollback_run(
+                trace,
+                approved_action=approved_action,
+                rollback_result=rollback_result,
+                post_rollback_check=post_rollback_check,
+            )
         verification_result = {
             "pre_check": pre_check,
             "post_check": {
@@ -235,6 +472,7 @@ def run_crashloop_recovery_from_payload(
             final_state=final_state,
             rollback_triggered=rollback_triggered,
         )
+        trace = _append_finalization_run(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -251,6 +489,23 @@ def run_crashloop_recovery_from_payload(
         namespace=namespace,
         deployment=deployment,
     )
+    trace = append_node_run(
+        trace,
+        node_name="post_check",
+        status=str(post_check["status"]),
+        summary="Post-check verification evaluated whether recovery succeeded after execution.",
+        input_summary={
+            "namespace": namespace,
+            "deployment": deployment,
+            "action_id": approved_action.action_id,
+        },
+        output_summary={
+            "status": post_check["status"],
+            "crashloop_count": post_check.get("crashloop_count"),
+            "ready_count": post_check.get("ready_count"),
+            "attempts": post_check.get("attempts"),
+        },
+    )
     rollback_triggered, rollback_result, post_rollback_check = _attempt_bounded_rollback(
         action=approved_action,
         kubernetes=kubernetes,
@@ -261,6 +516,12 @@ def run_crashloop_recovery_from_payload(
     ) if post_check["status"] != "recovered" else (False, None, None)
     if rollback_result is not None:
         execution_result["rollback"] = rollback_result
+        trace = _append_rollback_run(
+            trace,
+            approved_action=approved_action,
+            rollback_result=rollback_result,
+            post_rollback_check=post_rollback_check,
+        )
     final_state = "recovered"
     if post_check["status"] != "recovered":
         if post_rollback_check is not None and post_rollback_check["status"] == "recovered":
@@ -278,6 +539,7 @@ def run_crashloop_recovery_from_payload(
         final_state=final_state,
         rollback_triggered=rollback_triggered,
     )
+    trace = _append_finalization_run(trace)
     return _build_result(
         incident=incident,
         fixer_state=fixer_state,
@@ -353,7 +615,51 @@ def _build_result(
             "candidate_actions": hitl_decision.candidate_actions,
         },
         "decision_trace": decision_trace,
+        "decision_trace_timeline": derive_trace_timeline(decision_trace),
     }
+
+
+def _saved_mapping(value: Any, *, field_name: str) -> dict[str, Any]:
+    if is_dataclass(value):
+        value = asdict(value)
+    if not isinstance(value, dict):
+        raise TypeError(f"saved {field_name} must be an object")
+    return value
+
+
+def _remediation_action_from_saved(value: Any) -> RemediationAction | None:
+    if value is None:
+        return None
+    if is_dataclass(value):
+        value = asdict(value)
+    if not isinstance(value, dict):
+        raise TypeError("saved remediation action must be an object")
+    return RemediationAction(
+        action_id=str(value["action_id"]),
+        action_type=value["action_type"],
+        description=str(value["description"]),
+        confidence_score=float(value["confidence_score"]),
+        blast_radius_score=float(value["blast_radius_score"]),
+        requires_approval=bool(value["requires_approval"]),
+        parameters=dict(value["parameters"]),
+    )
+
+
+def _decision_trace_from_saved(value: dict[str, Any]) -> DecisionTrace:
+    return DecisionTrace(
+        incident_id=str(value["incident_id"]),
+        fixer_plan=dict(value["fixer_plan"]),
+        judge_verdict=value["judge_verdict"],
+        judge_reason=str(value["judge_reason"]),
+        routing_decision=str(value["routing_decision"]),
+        human_approval=value["human_approval"],
+        execution_result=dict(value["execution_result"]),
+        verification_result=dict(value["verification_result"]),
+        rollback_triggered=bool(value["rollback_triggered"]),
+        final_state=value["final_state"],
+        node_runs_by_node=dict(value.get("node_runs_by_node", {})),
+        latest_run_id_by_node=dict(value.get("latest_run_id_by_node", {})),
+    )
 
 
 def _to_jsonable(value: Any) -> Any:
@@ -384,6 +690,59 @@ def _allowed_tool_names_for_action(action_type: str) -> list[str]:
             "rollout_restart_deployment",
         ]
     raise ValueError(f"Unsupported crashloop execution action: {action_type}")
+
+
+def _execution_worker_summary(status: str) -> str:
+    if status == "succeeded":
+        return "Execution worker completed the approved remediation action."
+    return "Execution worker failed while attempting the approved remediation action."
+
+
+def _execution_worker_llm_explanation(
+    *,
+    action: RemediationAction,
+    worker_result: ExecutionResult,
+) -> str | None:
+    narrative = _truncate_text(worker_result.summary, limit=300)
+
+    namespace = str(action.parameters["namespace"])
+    deployment = str(action.parameters["deployment"])
+    tool_names = [
+        str(entry.get("tool_name"))
+        for entry in worker_result.tool_transcript
+        if isinstance(entry.get("tool_name"), str)
+    ]
+    tool_clause = (
+        f"It used the bounded tools {', '.join(tool_names)} before finishing."
+        if tool_names
+        else "It did not report any tool invocations before finishing."
+    )
+    command_text = " ".join(worker_result.command) if worker_result.command else "no command"
+    outcome_clause = (
+        f"The approved action succeeded with return code {worker_result.returncode}."
+        if worker_result.status == "succeeded"
+        else f"The approved action failed with return code {worker_result.returncode}."
+    )
+
+    stdout = _truncate_text(worker_result.stdout, limit=200)
+    stderr = _truncate_text(worker_result.stderr, limit=200)
+    io_clause = ""
+    if stdout:
+        io_clause += f" stdout={stdout!r}."
+    if stderr:
+        io_clause += f" stderr={stderr!r}."
+
+    base_explanation = (
+        f"The Gemini execution agent handled approved action {action.action_id!r} "
+        f"({action.action_type}) for deployment {deployment!r} in namespace {namespace!r}. "
+        f"{tool_clause} It executed {command_text!r}. {outcome_clause}{io_clause}"
+    )
+    if narrative:
+        lead = narrative
+        if lead[-1] not in ".!?":
+            lead += "."
+        return f"{lead} {base_explanation}"
+    return base_explanation
 
 
 def _apply_kubernetes_recovery_fallback(
@@ -474,11 +833,65 @@ def _recovery_latency_seconds(requested_at: str) -> float:
     return max(0.0, (datetime.now(UTC) - started).total_seconds())
 
 
+def _append_rollback_run(
+    trace: DecisionTrace,
+    *,
+    approved_action: RemediationAction,
+    rollback_result: dict[str, object],
+    post_rollback_check: dict[str, object] | None,
+) -> DecisionTrace:
+    return append_node_run(
+        trace,
+        node_name="rollback",
+        status=str(rollback_result["status"]),
+        summary="HERALD triggered a bounded rollback after the approved action failed to verify cleanly.",
+        input_summary={
+            "failed_action_id": approved_action.action_id,
+            "failed_action_type": approved_action.action_type,
+        },
+        output_summary={
+            "status": rollback_result["status"],
+            "action_type": rollback_result["action_type"],
+            "returncode": rollback_result["returncode"],
+            "post_rollback_status": post_rollback_check["status"] if post_rollback_check else None,
+        },
+    )
+
+
+def _append_finalization_run(trace: DecisionTrace) -> DecisionTrace:
+    return append_node_run(
+        trace,
+        node_name="finalization",
+        status=str(trace.final_state),
+        summary="DecisionTrace was finalized with the latest workflow state.",
+        input_summary={
+            "human_approval": trace.human_approval,
+            "routing_decision": trace.routing_decision,
+        },
+        output_summary={
+            "final_state": trace.final_state,
+            "rollback_triggered": trace.rollback_triggered,
+        },
+    )
+
+
+def _truncate_text(value: Any, limit: int = 200) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    if len(stripped) <= limit:
+        return stripped
+    return stripped[:limit] + "...<truncated>"
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the crashloop recovery workflow from an Alertmanager payload."
     )
     parser.add_argument("--payload-file", required=True)
+    parser.add_argument("--resume-from-file")
     parser.add_argument("--approve-action-id")
     parser.add_argument("--reject-action-id")
     parser.add_argument(
@@ -513,23 +926,36 @@ def main() -> int:
     if not isinstance(payload, dict):
         raise TypeError("payload JSON must be an object")
 
-    fixer_llm = None
-    if args.fixer_provider == "gemini":
-        fixer_llm = GeminiFixerLLM(model=args.fixer_model)
-
-    judge_llm = None
-    if args.judge_provider == "gemini":
-        judge_llm = GeminiJudgeLLM(model=args.judge_model)
-
     prometheus_client = PrometheusClient(base_url=args.prometheus_base_url)
-    result = run_crashloop_recovery_from_payload(
-        payload,
-        approve_action_id=args.approve_action_id,
-        reject_action_id=args.reject_action_id,
-        fixer_llm=fixer_llm,
-        judge_llm=judge_llm,
-        prometheus_client=prometheus_client,
-    )
+    if args.resume_from_file:
+        with open(args.resume_from_file, "r", encoding="utf-8") as handle:
+            saved_result = json.load(handle)
+        if not isinstance(saved_result, dict):
+            raise TypeError("resume-from-file JSON must be an object")
+        result = run_crashloop_recovery_from_saved_plan(
+            payload,
+            saved_result,
+            approve_action_id=args.approve_action_id,
+            reject_action_id=args.reject_action_id,
+            prometheus_client=prometheus_client,
+        )
+    else:
+        fixer_llm = None
+        if args.fixer_provider == "gemini":
+            fixer_llm = GeminiFixerLLM(model=args.fixer_model)
+
+        judge_llm = None
+        if args.judge_provider == "gemini":
+            judge_llm = GeminiJudgeLLM(model=args.judge_model)
+
+        result = run_crashloop_recovery_from_payload(
+            payload,
+            approve_action_id=args.approve_action_id,
+            reject_action_id=args.reject_action_id,
+            fixer_llm=fixer_llm,
+            judge_llm=judge_llm,
+            prometheus_client=prometheus_client,
+        )
     print(json.dumps(_to_jsonable(result), default=str, indent=2))
     return 0
 

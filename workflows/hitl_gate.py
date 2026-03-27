@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from schemas.decision_trace import DecisionTrace, FinalState, HumanApproval
@@ -78,16 +78,9 @@ def record_human_approval(
     human_approval: HumanApproval,
     final_state: FinalState | None = None,
 ) -> DecisionTrace:
-    return DecisionTrace(
-        incident_id=trace.incident_id,
-        fixer_plan=trace.fixer_plan,
-        judge_verdict=trace.judge_verdict,
-        judge_reason=trace.judge_reason,
-        routing_decision=trace.routing_decision,
+    return replace(
+        trace,
         human_approval=human_approval,
-        execution_result=trace.execution_result,
-        verification_result=trace.verification_result,
-        rollback_triggered=trace.rollback_triggered,
         final_state=final_state or trace.final_state,
     )
 
@@ -100,13 +93,8 @@ def finalize_decision_trace(
     final_state: FinalState,
     rollback_triggered: bool = False,
 ) -> DecisionTrace:
-    return DecisionTrace(
-        incident_id=trace.incident_id,
-        fixer_plan=trace.fixer_plan,
-        judge_verdict=trace.judge_verdict,
-        judge_reason=trace.judge_reason,
-        routing_decision=trace.routing_decision,
-        human_approval=trace.human_approval,
+    return replace(
+        trace,
         execution_result=execution_result,
         verification_result=verification_result,
         rollback_triggered=rollback_triggered,

@@ -14,6 +14,7 @@ REJECTION_OUTPUT="${ARTIFACT_DIR}/rejection-run.json"
 TERMINAL_LOG="${ARTIFACT_DIR}/worker-stream.log"
 APPLY_SCENARIO=true
 DECISION_MODE="prompt"
+PROM_QUERY='sum(max_over_time(kube_pod_container_status_waiting_reason{namespace="default",reason="CrashLoopBackOff",pod=~"cartservice-.*"}[2m]))'
 
 while [[ "${#}" -gt 0 ]]; do
   case "$1" in
@@ -53,6 +54,7 @@ require_command() {
 }
 
 require_command kubectl
+require_command curl
 
 if [[ ! -x "${PYTHON_BIN}" ]]; then
   echo "Error: Python runner not found at ${PYTHON_BIN}" >&2
@@ -80,6 +82,46 @@ for _ in $(seq 1 30); do
   fi
   sleep 2
 done
+
+wait_for_prometheus_signal() {
+  echo
+  echo "== Waiting for Prometheus crashloop signal to catch up =="
+  for _ in $(seq 1 30); do
+    RESPONSE="$(curl -sG "${PROM_URL%/}/api/v1/query" --data-urlencode "query=${PROM_QUERY}" || true)"
+    VALUE="$("${PYTHON_BIN}" - <<'PY' "${RESPONSE}"
+import json
+import sys
+
+payload_text = sys.argv[1]
+if not payload_text.strip():
+    print("0")
+    raise SystemExit(0)
+
+try:
+    payload = json.loads(payload_text)
+except json.JSONDecodeError:
+    print("0")
+    raise SystemExit(0)
+
+result = payload.get("data", {}).get("result", [])
+if not result:
+    print("0")
+    raise SystemExit(0)
+
+sample = result[0].get("value", [None, "0"])[1]
+print(sample)
+PY
+)"
+    if [[ "${VALUE}" != "0" && "${VALUE}" != "0.0" ]]; then
+      echo "Prometheus crashloop query is now ${VALUE}"
+      return 0
+    fi
+    sleep 2
+  done
+
+  echo "Warning: Prometheus crashloop signal did not turn positive before timeout." >&2
+  return 1
+}
 
 echo
 echo "== Running HERALD planning pass =="
@@ -128,10 +170,16 @@ if [[ "${DECISION_MODE}" == "prompt" ]]; then
 fi
 
 if [[ "${DECISION_MODE}" == "approve" ]]; then
-  echo "== Running HERALD approval pass =="
+  if ! wait_for_prometheus_signal; then
+    echo "Refusing to auto-approve because Prometheus never confirmed the crashloop signal." >&2
+    echo "You can wait for the scrape to catch up and rerun the helper, or inspect the cluster manually." >&2
+    exit 1
+  fi
+  echo "== Running HERALD approval pass from saved first-pass artifact =="
   "${PYTHON_BIN}" -m workflows.recovery_workflow \
     --payload-file "${PAYLOAD_FILE}" \
     --prometheus-base-url "${PROM_URL}" \
+    --resume-from-file "${FIRST_PASS_OUTPUT}" \
     --approve-action-id "${ACTION_ID}" \
     2> >(tee "${TERMINAL_LOG}" >&2) | tee "${APPROVAL_OUTPUT}"
 
@@ -154,10 +202,11 @@ PY
 fi
 
 if [[ "${DECISION_MODE}" == "reject" ]]; then
-  echo "== Running HERALD rejection pass =="
+  echo "== Running HERALD rejection pass from saved first-pass artifact =="
   "${PYTHON_BIN}" -m workflows.recovery_workflow \
     --payload-file "${PAYLOAD_FILE}" \
     --prometheus-base-url "${PROM_URL}" \
+    --resume-from-file "${FIRST_PASS_OUTPUT}" \
     --reject-action-id "${ACTION_ID}" | tee "${REJECTION_OUTPUT}"
 
   echo
@@ -169,4 +218,5 @@ echo "Next step:"
 echo "\"${PYTHON_BIN}\" -m workflows.recovery_workflow \\"
 echo "  --payload-file \"${PAYLOAD_FILE}\" \\"
 echo "  --prometheus-base-url \"${PROM_URL}\" \\"
+echo "  --resume-from-file \"${FIRST_PASS_OUTPUT}\" \\"
 echo "  --approve-action-id \"${ACTION_ID}\""

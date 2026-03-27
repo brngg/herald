@@ -247,6 +247,7 @@ That helper:
 - runs the first HERALD pass
 - saves the first-pass JSON to `artifacts/crashloop/<timestamp>/first-pass.json`
 - prompts you to approve, reject, or stop
+- resumes approval or rejection from the saved first-pass artifact instead of rerunning Fixer and Judge
 - if approved, saves the final JSON to `artifacts/crashloop/<timestamp>/approval-run.json`
 - if approved, saves the live worker stream to `artifacts/crashloop/<timestamp>/worker-stream.log`
 - if rejected, saves the rejection JSON to `artifacts/crashloop/<timestamp>/rejection-run.json`
@@ -319,12 +320,14 @@ Copy the `action_id` from `hitl_decision.recommended_action` in the first run an
 pass it back with `--approve-action-id`. On the default heuristic path, the
 recommended action is typically `rollout_undo_cartservice`.
 
-This second run approves the selected action and allows the workflow to execute
-the bounded crashloop remediation:
+The recommended approval flow resumes from the saved first-pass artifact so the
+second command does not rerun Fixer or Judge. This second run approves the
+selected action and allows the workflow to execute the bounded crashloop remediation:
 
 ```bash
 ./.venv/bin/python -m workflows.recovery_workflow \
   --payload-file payloads/crashloop_alert.json \
+  --resume-from-file /tmp/herald-first-pass.json \
   --approve-action-id rollout_undo_cartservice \
   --prometheus-base-url http://localhost:9090
 ```
@@ -344,6 +347,7 @@ If you want to exercise the human rejection path instead of executing the action
 ```bash
 ./.venv/bin/python -m workflows.recovery_workflow \
   --payload-file payloads/crashloop_alert.json \
+  --resume-from-file /tmp/herald-first-pass.json \
   --reject-action-id rollout_undo_cartservice \
   --prometheus-base-url http://localhost:9090
 ```
@@ -390,8 +394,28 @@ You can also override models explicitly:
 ```
 
 When using Gemini, action ordering, scores, and `action_id` values can vary. Run
-the workflow once without approval, copy the recommended `action_id`, then rerun
-with `--approve-action-id`.
+the workflow once without approval, copy the recommended `action_id`, then resume
+from that saved artifact for approval so Fixer and Judge are not called twice.
+
+Gemini no-rerun approval flow:
+
+```bash
+./.venv/bin/python -m workflows.recovery_workflow \
+  --payload-file payloads/crashloop_alert.json \
+  --prometheus-base-url http://localhost:9090 \
+  --fixer-provider gemini \
+  --judge-provider gemini | tee /tmp/herald-first-pass.json
+```
+
+```bash
+ACTION_ID="$(jq -r '.hitl_decision.recommended_action.action_id' /tmp/herald-first-pass.json)"
+
+./.venv/bin/python -m workflows.recovery_workflow \
+  --payload-file payloads/crashloop_alert.json \
+  --prometheus-base-url http://localhost:9090 \
+  --resume-from-file /tmp/herald-first-pass.json \
+  --approve-action-id "$ACTION_ID" | tee /tmp/herald-approval-run.json
+```
 
 Gemini Fixer -> Gemini Judge:
 

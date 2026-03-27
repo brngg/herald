@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from dataclasses import dataclass
+from typing import Any
 from typing import Callable, Sequence
 
 
@@ -46,6 +47,33 @@ class KubernetesClient:
         return {
             "status": "succeeded" if completed.returncode == 0 else "failed",
             "action_type": "rollout_restart_deployment",
+            "namespace": namespace,
+            "deployment": deployment,
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+        }
+
+    def wait_for_rollout_deployment(
+        self,
+        *,
+        namespace: str,
+        deployment: str,
+        timeout_seconds: int = 300,
+    ) -> dict[str, Any]:
+        command = [
+            "kubectl",
+            "rollout",
+            "status",
+            f"deployment/{deployment}",
+            "-n",
+            namespace,
+            f"--timeout={timeout_seconds}s",
+        ]
+        completed = self._run(command)
+        return {
+            "status": "succeeded" if completed.returncode == 0 else "failed",
             "namespace": namespace,
             "deployment": deployment,
             "command": command,

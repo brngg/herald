@@ -107,13 +107,142 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(trace.human_approval, "approved")
         self.assertEqual(trace.execution_result["status"], "succeeded")
         self.assertEqual(trace.execution_result["action_type"], "rollout_undo_deployment")
+        self.assertEqual(trace.execution_result["rollout_status"]["status"], "succeeded")
         self.assertEqual(trace.verification_result["pre_check"]["status"], "ready_to_execute")
         self.assertEqual(trace.verification_result["post_check"]["status"], "recovered")
+        self.assertEqual(trace.verification_result["post_check"]["attempts"], 6)
         self.assertEqual(trace.final_state, "recovered")
         self.assertFalse(trace.rollback_triggered)
         self.assertEqual(
             commands,
-            [["kubectl", "rollout", "undo", "deployment/cartservice", "-n", "default"]],
+            [
+                ["kubectl", "rollout", "undo", "deployment/cartservice", "-n", "default"],
+                [
+                    "kubectl",
+                    "rollout",
+                    "status",
+                    "deployment/cartservice",
+                    "-n",
+                    "default",
+                    "--timeout=300s",
+                ],
+            ],
+        )
+
+    def test_workflow_retries_pre_check_before_skipping_execution(self) -> None:
+        commands: list[list[str]] = []
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout="ok",
+                stderr="",
+            )
+
+        crashloop_queries = iter([0.0, 1.0, 0.0])
+
+        def query_runner(query: str) -> float:
+            if "kube_pod_container_status_waiting_reason" in query:
+                return next(crashloop_queries)
+            if "kube_pod_status_ready" in query:
+                return 1.0
+            raise AssertionError(f"Unexpected query: {query}")
+
+        prometheus = PrometheusClient(
+            query_runner=query_runner,
+            pre_check_retry_attempts=2,
+            pre_check_retry_sleep_seconds=0.0,
+            sleep_fn=lambda _: None,
+        )
+        kubernetes = KubernetesClient(runner=runner)
+
+        result = run_crashloop_recovery_from_payload(
+            _crashloop_payload(),
+            approve_action_id="rollout_undo_cartservice",
+            kubernetes_client=kubernetes,
+            prometheus_client=prometheus,
+        )
+
+        trace = result["decision_trace"]
+
+        self.assertEqual(trace.verification_result["pre_check"]["status"], "ready_to_execute")
+        self.assertEqual(trace.verification_result["pre_check"]["attempts"], 2)
+        self.assertEqual(trace.execution_result["status"], "succeeded")
+        self.assertEqual(trace.final_state, "recovered")
+        self.assertEqual(
+            commands,
+            [
+                ["kubectl", "rollout", "undo", "deployment/cartservice", "-n", "default"],
+                [
+                    "kubectl",
+                    "rollout",
+                    "status",
+                    "deployment/cartservice",
+                    "-n",
+                    "default",
+                    "--timeout=300s",
+                ],
+            ],
+        )
+
+    def test_workflow_retries_post_check_until_ready_signal_appears(self) -> None:
+        commands: list[list[str]] = []
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout="ok",
+                stderr="",
+            )
+
+        crashloop_queries = iter([1.0, 0.0, 0.0])
+        ready_queries = iter([0.0, 1.0])
+
+        def query_runner(query: str) -> float:
+            if "kube_pod_container_status_waiting_reason" in query:
+                return next(crashloop_queries)
+            if "kube_pod_status_ready" in query:
+                return next(ready_queries)
+            raise AssertionError(f"Unexpected query: {query}")
+
+        prometheus = PrometheusClient(
+            query_runner=query_runner,
+            post_check_retry_attempts=2,
+            post_check_retry_sleep_seconds=0.0,
+            sleep_fn=lambda _: None,
+        )
+        kubernetes = KubernetesClient(runner=runner)
+
+        result = run_crashloop_recovery_from_payload(
+            _crashloop_payload(),
+            approve_action_id="rollout_undo_cartservice",
+            kubernetes_client=kubernetes,
+            prometheus_client=prometheus,
+        )
+
+        trace = result["decision_trace"]
+
+        self.assertEqual(trace.verification_result["post_check"]["status"], "recovered")
+        self.assertEqual(trace.verification_result["post_check"]["attempts"], 2)
+        self.assertEqual(trace.final_state, "recovered")
+        self.assertEqual(
+            commands,
+            [
+                ["kubectl", "rollout", "undo", "deployment/cartservice", "-n", "default"],
+                [
+                    "kubectl",
+                    "rollout",
+                    "status",
+                    "deployment/cartservice",
+                    "-n",
+                    "default",
+                    "--timeout=300s",
+                ],
+            ],
         )
 
     def test_workflow_refuses_execution_when_hitl_gate_halts(self) -> None:

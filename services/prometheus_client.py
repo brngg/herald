@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+import time
 from typing import Callable
 
 
 PrometheusQueryRunner = Callable[[str], float]
+SleepFn = Callable[[float], None]
 
 
 @dataclass(slots=True)
@@ -13,10 +15,29 @@ class PrometheusClient:
     base_url: str | None = None
     query_runner: PrometheusQueryRunner | None = None
     timeout_seconds: float = 10.0
+    pre_check_retry_attempts: int = 3
+    pre_check_retry_sleep_seconds: float = 2.0
+    pre_check_lookback_window: str = "2m"
+    post_check_retry_attempts: int = 6
+    post_check_retry_sleep_seconds: float = 5.0
+    sleep_fn: SleepFn = time.sleep
 
     def pre_check_crashloop(self, *, namespace: str, deployment: str) -> dict[str, object]:
-        crashloop_query = _crashloop_query(namespace=namespace, deployment=deployment)
-        crashloop_count = self._query(crashloop_query)
+        crashloop_query = _recent_crashloop_query(
+            namespace=namespace,
+            deployment=deployment,
+            lookback_window=self.pre_check_lookback_window,
+        )
+        crashloop_count = 0.0
+        attempts = max(1, self.pre_check_retry_attempts)
+
+        for attempt in range(1, attempts + 1):
+            crashloop_count = self._query(crashloop_query)
+            if crashloop_count > 0:
+                break
+            if attempt < attempts:
+                self.sleep_fn(self.pre_check_retry_sleep_seconds)
+
         return {
             "status": "ready_to_execute" if crashloop_count > 0 else "not_firing",
             "namespace": namespace,
@@ -24,20 +45,33 @@ class PrometheusClient:
             "crashloop_count": crashloop_count,
             "query": crashloop_query,
             "should_execute": crashloop_count > 0,
+            "attempts": attempts,
         }
 
     def post_check_crashloop(self, *, namespace: str, deployment: str) -> dict[str, object]:
         crashloop_query = _crashloop_query(namespace=namespace, deployment=deployment)
         ready_query = _ready_query(namespace=namespace, deployment=deployment)
-        crashloop_count = self._query(crashloop_query)
-        ready_count = self._query(ready_query)
-        recovered = crashloop_count == 0 and ready_count > 0
+        crashloop_count = 0.0
+        ready_count = 0.0
+        attempts = max(1, self.post_check_retry_attempts)
+        recovered = False
+
+        for attempt in range(1, attempts + 1):
+            crashloop_count = self._query(crashloop_query)
+            ready_count = self._query(ready_query)
+            recovered = crashloop_count == 0 and ready_count > 0
+            if recovered:
+                break
+            if attempt < attempts:
+                self.sleep_fn(self.post_check_retry_sleep_seconds)
+
         return {
             "status": "recovered" if recovered else "unrecovered",
             "namespace": namespace,
             "deployment": deployment,
             "crashloop_count": crashloop_count,
             "ready_count": ready_count,
+            "attempts": attempts,
             "queries": {
                 "crashloop": crashloop_query,
                 "ready": ready_query,
@@ -70,6 +104,13 @@ def _crashloop_query(*, namespace: str, deployment: str) -> str:
     return (
         "sum(kube_pod_container_status_waiting_reason"
         f'{{namespace="{namespace}",reason="CrashLoopBackOff",pod=~"{deployment}-.*"}})'
+    )
+
+
+def _recent_crashloop_query(*, namespace: str, deployment: str, lookback_window: str) -> str:
+    return (
+        "sum(max_over_time(kube_pod_container_status_waiting_reason"
+        f'{{namespace="{namespace}",reason="CrashLoopBackOff",pod=~"{deployment}-.*"}}[{lookback_window}]))'
     )
 
 

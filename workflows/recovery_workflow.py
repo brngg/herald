@@ -102,6 +102,11 @@ def run_crashloop_recovery_from_payload(
         )
 
     execution_result = _execute_action(kubernetes, approved_action)
+    if execution_result["status"] == "succeeded":
+        execution_result["rollout_status"] = kubernetes.wait_for_rollout_deployment(
+            namespace=namespace,
+            deployment=deployment,
+        )
     post_check = prometheus.post_check_crashloop(namespace=namespace, deployment=deployment)
     final_state = "recovered" if post_check["status"] == "recovered" else "unrecovered"
     trace = finalize_decision_trace(

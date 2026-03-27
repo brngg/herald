@@ -217,6 +217,28 @@ vertical slice on `cartservice`. It runs:
 - bounded execution for rollout undo or rollout restart
 - post-check verification
 
+### Fastest Demo Path
+
+If your local stack and Prometheus port-forward are already running, use:
+
+```bash
+./scripts/run_crashloop_demo.sh
+```
+
+That helper:
+
+- applies the crashloop scenario
+- waits until `cartservice` is visibly failing
+- runs the first HERALD pass
+- saves the first-pass JSON to `/tmp/herald-crashloop-plan.json`
+- prints the exact approval command to run next
+
+If the bad deploy is already active and you only want to run the first HERALD pass:
+
+```bash
+./scripts/run_crashloop_demo.sh --skip-apply
+```
+
 ### Prerequisites
 
 - Local cluster and observability stack are up

@@ -154,13 +154,13 @@ echo "Recommended action_id: ${ACTION_ID}"
 echo
 
 if [[ "${DECISION_MODE}" == "prompt" ]]; then
-  printf "Choose next step: [a]pprove / [r]eject / [s]top: "
+  printf "Choose next step: 1=approve / 2=reject / anything else=stop: "
   read -r DECISION_INPUT
   case "${DECISION_INPUT}" in
-    a|A)
+    1)
       DECISION_MODE="approve"
       ;;
-    r|R)
+    2)
       DECISION_MODE="reject"
       ;;
     *)

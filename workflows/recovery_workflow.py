@@ -318,6 +318,33 @@ def _continue_crashloop_recovery(
         },
     )
 
+    if approved_action.action_type not in {"rollout_undo_deployment", "rollout_restart_deployment"}:
+        final_state = "escalated"
+        execution_result = {
+            "status": "not_executed",
+            "action_id": approved_action.action_id,
+            "action_type": approved_action.action_type,
+            "reason": "Approved action does not execute an automated bounded rollout step.",
+        }
+        verification_result = {
+            "status": "not_run",
+            "reason": "No automated execution was attempted because the approved action was non-executable.",
+        }
+        trace = finalize_decision_trace(
+            trace,
+            execution_result=execution_result,
+            verification_result=verification_result,
+            final_state=final_state,
+        )
+        trace = _append_finalization_run(trace)
+        return _build_result(
+            incident=incident,
+            fixer_state=fixer_state,
+            judge_state=judge_state,
+            hitl_decision=hitl_decision,
+            decision_trace=trace,
+        )
+
     namespace = str(approved_action.parameters["namespace"])
     deployment = str(approved_action.parameters["deployment"])
     prometheus = prometheus_client or PrometheusClient()
@@ -895,6 +922,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--approve-action-id")
     parser.add_argument("--reject-action-id")
     parser.add_argument(
+        "--interactive-hitl",
+        action="store_true",
+        help="Run planning first, then prompt in the terminal: 1 = approve recommended action, 2 = reject.",
+    )
+    parser.add_argument(
         "--fixer-provider",
         choices=("heuristic", "gemini"),
         default="heuristic",
@@ -927,6 +959,10 @@ def main() -> int:
         raise TypeError("payload JSON must be an object")
 
     prometheus_client = PrometheusClient(base_url=args.prometheus_base_url)
+    if args.interactive_hitl and args.resume_from_file:
+        raise ValueError("--interactive-hitl cannot be combined with --resume-from-file.")
+    if args.interactive_hitl and (args.approve_action_id or args.reject_action_id):
+        raise ValueError("--interactive-hitl cannot be combined with explicit approve/reject action ids.")
     if args.resume_from_file:
         with open(args.resume_from_file, "r", encoding="utf-8") as handle:
             saved_result = json.load(handle)
@@ -948,16 +984,73 @@ def main() -> int:
         if args.judge_provider == "gemini":
             judge_llm = GeminiJudgeLLM(model=args.judge_model)
 
-        result = run_crashloop_recovery_from_payload(
-            payload,
-            approve_action_id=args.approve_action_id,
-            reject_action_id=args.reject_action_id,
-            fixer_llm=fixer_llm,
-            judge_llm=judge_llm,
-            prometheus_client=prometheus_client,
-        )
+        if args.interactive_hitl:
+            planning_result = run_crashloop_recovery_from_payload(
+                payload,
+                fixer_llm=fixer_llm,
+                judge_llm=judge_llm,
+                prometheus_client=prometheus_client,
+            )
+            result = _continue_with_interactive_hitl(
+                payload=payload,
+                planning_result=planning_result,
+                prometheus_client=prometheus_client,
+            )
+        else:
+            result = run_crashloop_recovery_from_payload(
+                payload,
+                approve_action_id=args.approve_action_id,
+                reject_action_id=args.reject_action_id,
+                fixer_llm=fixer_llm,
+                judge_llm=judge_llm,
+                prometheus_client=prometheus_client,
+            )
     print(json.dumps(_to_jsonable(result), default=str, indent=2))
     return 0
+
+
+def _continue_with_interactive_hitl(
+    *,
+    payload: dict[str, Any],
+    planning_result: dict[str, Any],
+    prometheus_client: PrometheusClient,
+    kubernetes_client: KubernetesClient | None = None,
+    execution_worker_client: ExecutionWorkerClient | None = None,
+    input_fn: Any = input,
+) -> dict[str, Any]:
+    hitl_decision = planning_result["hitl_decision"]
+    recommended_action = hitl_decision["recommended_action"]
+    if recommended_action is None:
+        return planning_result
+
+    action_id = recommended_action.action_id
+    action_type = recommended_action.action_type
+    print(
+        f"HITL Gate: recommended action {action_id} ({action_type}).",
+        flush=True,
+    )
+    print("Enter 1 to approve or 2 to reject.", flush=True)
+    user_choice = str(input_fn("> ")).strip()
+
+    if user_choice == "1":
+        return run_crashloop_recovery_from_saved_plan(
+            payload,
+            planning_result,
+            approve_action_id=action_id,
+            kubernetes_client=kubernetes_client,
+            prometheus_client=prometheus_client,
+            execution_worker_client=execution_worker_client,
+        )
+    if user_choice == "2":
+        return run_crashloop_recovery_from_saved_plan(
+            payload,
+            planning_result,
+            reject_action_id=action_id,
+            kubernetes_client=kubernetes_client,
+            prometheus_client=prometheus_client,
+            execution_worker_client=execution_worker_client,
+        )
+    return planning_result
 
 
 if __name__ == "__main__":

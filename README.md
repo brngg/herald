@@ -37,6 +37,79 @@ HERALD is built around three principles:
 
 ---
 
+## Design Evolution
+
+### Backstory
+
+HERALD started from a simple observation: most teams already have detection, but they
+still do recovery manually. Alertmanager fires, an operator opens dashboards, runs a
+known command, and then has to decide whether the system actually recovered. The goal
+of HERALD is to close that gap with a control plane that is explainable, approval-gated,
+and verification-driven.
+
+That is why the project emphasizes the full chain:
+
+- Fixer generates a plan
+- Judge evaluates whether the plan is safe enough to surface
+- the HITL Gate requires human approval before execution
+- HERALD verifies whether recovery actually happened
+- the `DecisionTrace` records the full lifecycle
+
+### How HERALD Works Today
+
+The current implementation is intentionally bounded. For the live crashloop slice, the
+system already knows the supported incident class and operates over a small set of
+reversible remediation actions such as rollout undo and rollout restart.
+
+This can feel controlled because, today, the workflow is still operating inside a known
+corridor:
+
+- HERALD parses a supported alert
+- Fixer ranks bounded remediation actions
+- Judge evaluates the proposed plan against the safety rubric
+- the HITL Gate surfaces the recommended action
+- after approval, HERALD executes the bounded action
+- HERALD runs pre-check and post-check verification
+- the `DecisionTrace` records both the rolled-up state and node-run provenance
+
+The system works this way right now for a reason:
+
+- it keeps execution safe and reversible during the demo phase
+- it makes evaluation and replay honest and repeatable
+- it proves the control-plane architecture before expanding the action surface
+- it avoids pretending HERALD can already fix arbitrary incidents safely
+
+In other words, the current demo is not trying to show unlimited autonomy. It is trying
+to prove that approval-gated Verified Recovery works end to end.
+
+### Future Direction: Derived Mutation Plans
+
+The longer-term idea is not to hand-author an enormous toolbox of incident-specific
+commands forever. The intended evolution is for HERALD to become more dynamic by using
+Fixer and Judge output to derive the executable mutation plan itself.
+
+The future shape looks more like this:
+
+- Fixer produces a structured remediation plan, not just a pre-named action choice
+- Judge evaluates that plan for safety, blast radius, and plausibility
+- HERALD translates the approved plan into an exact executable mutation plan
+- the operator approves that exact plan through the HITL Gate
+- HERALD executes it and verifies recovery
+
+That direction keeps the current philosophy intact:
+
+- HERALD should try to find a fix, not only recommend escalation
+- a human still approves before execution
+- recovery is only considered successful after verification
+- the `DecisionTrace` still captures plan, verdict, approval, execution, and outcome
+
+This is the bridge from the current bounded-tool demo to a more flexible system. The
+demo phase uses a narrow execution corridor on purpose. Future HERALD should keep the
+same control-plane safeguards while becoming more adaptive in how it generates the
+mutation plan it asks the operator to approve.
+
+---
+
 ## Tech Stack
 
 | Layer | Technology |

@@ -4,12 +4,15 @@ import subprocess
 import sys
 import textwrap
 import unittest
+from dataclasses import replace
 
 from services.execution_worker import ExecutionWorkerClient
 from services.kubernetes_client import KubernetesClient
 from services.judge_llm import JudgeLLMResult
 from services.prometheus_client import PrometheusClient
+from schemas.remediation import RemediationAction
 from workflows.recovery_workflow import (
+    _continue_with_interactive_hitl,
     run_crashloop_recovery_from_payload,
     run_crashloop_recovery_from_saved_plan,
 )
@@ -289,6 +292,105 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
             commands,
             [["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=300s"]],
         )
+
+    def test_interactive_hitl_choice_approves_recommended_action(self) -> None:
+        planning_result = run_crashloop_recovery_from_payload(_crashloop_payload())
+
+        commands: list[list[str]] = []
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout="ok",
+                stderr="",
+            )
+
+        crashloop_queries = iter([1.0, 0.0])
+
+        def query_runner(query: str) -> float:
+            if "kube_pod_container_status_waiting_reason" in query:
+                return next(crashloop_queries)
+            if "kube_pod_status_ready" in query:
+                return 1.0
+            raise AssertionError(f"Unexpected query: {query}")
+
+        result = _continue_with_interactive_hitl(
+            payload=_crashloop_payload(),
+            planning_result=planning_result,
+            prometheus_client=PrometheusClient(query_runner=query_runner),
+            kubernetes_client=KubernetesClient(runner=runner),
+            execution_worker_client=_worker_client(),
+            input_fn=lambda _: "1",
+        )
+
+        trace = result["decision_trace"]
+        self.assertEqual(trace.human_approval, "approved")
+        self.assertEqual(trace.final_state, "recovered")
+        self.assertEqual(
+            commands,
+            [["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=300s"]],
+        )
+
+    def test_interactive_hitl_choice_rejects_recommended_action(self) -> None:
+        planning_result = run_crashloop_recovery_from_payload(_crashloop_payload())
+
+        result = _continue_with_interactive_hitl(
+            payload=_crashloop_payload(),
+            planning_result=planning_result,
+            prometheus_client=PrometheusClient(),
+            input_fn=lambda _: "2",
+        )
+
+        trace = result["decision_trace"]
+        self.assertEqual(trace.human_approval, "rejected")
+        self.assertEqual(trace.final_state, "rejected")
+
+    def test_interactive_hitl_approving_escalate_action_finalizes_cleanly(self) -> None:
+        planning_result = run_crashloop_recovery_from_payload(_crashloop_payload())
+        escalate_action = RemediationAction(
+            action_id="escalate-cartservice-crashloop",
+            action_type="escalate",
+            description="Escalate to a human operator for deeper investigation.",
+            confidence_score=0.9,
+            blast_radius_score=0.1,
+            requires_approval=True,
+            parameters={"reason": "Automated remediation should not proceed."},
+        )
+        planning_result["hitl_decision"]["recommended_action"] = escalate_action
+        planning_result["hitl_decision"]["candidate_actions"] = [escalate_action]
+        planning_result["decision_trace"] = replace(
+            planning_result["decision_trace"],
+            fixer_plan={
+                "actions": [
+                    {
+                        "action_id": escalate_action.action_id,
+                        "action_type": escalate_action.action_type,
+                        "description": escalate_action.description,
+                        "confidence_score": escalate_action.confidence_score,
+                        "blast_radius_score": escalate_action.blast_radius_score,
+                        "requires_approval": escalate_action.requires_approval,
+                        "parameters": escalate_action.parameters,
+                    }
+                ],
+                "fixer_rationale": "",
+            },
+        )
+
+        result = _continue_with_interactive_hitl(
+            payload=_crashloop_payload(),
+            planning_result=planning_result,
+            prometheus_client=PrometheusClient(),
+            input_fn=lambda _: "1",
+        )
+
+        trace = result["decision_trace"]
+        self.assertEqual(trace.human_approval, "approved")
+        self.assertEqual(trace.execution_result["status"], "not_executed")
+        self.assertEqual(trace.execution_result["action_type"], "escalate")
+        self.assertEqual(trace.verification_result["status"], "not_run")
+        self.assertEqual(trace.final_state, "escalated")
 
     def test_workflow_retries_post_check_until_ready_signal_appears(self) -> None:
         commands: list[list[str]] = []

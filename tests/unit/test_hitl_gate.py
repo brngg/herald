@@ -89,7 +89,7 @@ class HITLGateTest(unittest.TestCase):
         )
 
         self.assertEqual(decision.routing_decision, "halt")
-        self.assertTrue(decision.requires_approval)
+        self.assertFalse(decision.requires_approval)
         self.assertEqual(decision.decision_trace.routing_decision, "halt")
         self.assertEqual(decision.decision_trace.judge_reason, "Judge blocked the plan.")
 

@@ -82,6 +82,21 @@ class DecisionTraceSchemaTest(unittest.TestCase):
                 final_state="unrecovered",
             )
 
+    def test_rejects_unsupported_final_state(self) -> None:
+        with self.assertRaises(ValueError):
+            DecisionTrace(
+                incident_id="abc123",
+                fixer_plan={"actions": []},
+                judge_verdict="n/a",
+                judge_reason="pending",
+                routing_decision="halt",
+                human_approval="n/a",
+                execution_result={},
+                verification_result={},
+                rollback_triggered=False,
+                final_state="done",  # type: ignore[arg-type]
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,36 @@
+{
+  "scenario_id": "crashloop_recovered",
+  "description": "Crashloop recovery succeeds after approval and rollout convergence.",
+  "payload_file": "payloads/crashloop_alert.json",
+  "approve_action_id": "rollout_undo_cartservice",
+  "prometheus": {
+    "crashloop_values": [1.0, 0.0],
+    "ready_values": [1.0],
+    "pre_check_retry_attempts": 1,
+    "post_check_retry_attempts": 1
+  },
+  "worker_result": {
+    "status": "succeeded",
+    "returncode": 0,
+    "stdout": "deployment.apps/cartservice rolled back\n",
+    "stderr": "",
+    "summary": "Agent completed the approved remediation."
+  },
+  "kubernetes": {
+    "rollout_status": {
+      "returncode": 0,
+      "stdout": "deployment \"cartservice\" successfully rolled out\n",
+      "stderr": ""
+    },
+    "deployment_availability": {
+      "returncode": 0,
+      "stdout": "{\"status\":{\"availableReplicas\":1,\"readyReplicas\":1,\"observedGeneration\":18}}",
+      "stderr": ""
+    }
+  },
+  "expected": {
+    "top_action_id": "rollout_undo_cartservice",
+    "requires_approval": true,
+    "final_state": "recovered"
+  }
+}

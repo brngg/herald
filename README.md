@@ -229,6 +229,9 @@ The current live demo has been validated end to end on minikube:
 - wait for rollout completion and verify recovery
 - finish with `decision_trace.final_state = recovered`
 
+See [docs/recovery_architecture.md](/Users/bcheng/Projects/herald/docs/recovery_architecture.md) for the
+current control-plane diagram, recovery semantics, and the canonical crashloop artifact layout.
+
 ### Fastest Demo Path
 
 If your local stack and Prometheus port-forward are already running, use:
@@ -242,8 +245,11 @@ That helper:
 - applies the crashloop scenario
 - waits until `cartservice` is visibly failing
 - runs the first HERALD pass
-- saves the first-pass JSON to `/tmp/herald-crashloop-plan.json`
-- prints the exact approval command to run next
+- saves the first-pass JSON to `artifacts/crashloop/<timestamp>/first-pass.json`
+- prompts you to approve, reject, or stop
+- if approved, saves the final JSON to `artifacts/crashloop/<timestamp>/approval-run.json`
+- if approved, saves the live worker stream to `artifacts/crashloop/<timestamp>/worker-stream.log`
+- if rejected, saves the rejection JSON to `artifacts/crashloop/<timestamp>/rejection-run.json`
 
 ### Live Execution View
 
@@ -274,6 +280,12 @@ If the bad deploy is already active and you only want to run the first HERALD pa
 
 ```bash
 ./scripts/run_crashloop_demo.sh --skip-apply
+```
+
+To run the whole crashloop path in one operator command and auto-approve the recommended action:
+
+```bash
+./scripts/run_crashloop_demo.sh --auto-approve
 ```
 
 ### Prerequisites
@@ -323,7 +335,32 @@ What to look for:
 - `decision_trace.execution_result`
 - `decision_trace.verification_result.pre_check`
 - `decision_trace.verification_result.post_check`
-- `decision_trace.final_state` should end as `recovered` or `unrecovered`
+- `decision_trace.final_state` should end as `recovered`, `rolled_back`, or `escalated`
+
+### Step 2b: Run With Explicit Rejection
+
+If you want to exercise the human rejection path instead of executing the action:
+
+```bash
+./.venv/bin/python -m workflows.recovery_workflow \
+  --payload-file payloads/crashloop_alert.json \
+  --reject-action-id rollout_undo_cartservice \
+  --prometheus-base-url http://localhost:9090
+```
+
+What to look for:
+
+- `decision_trace.human_approval` should be `rejected`
+- `decision_trace.execution_result.status` should be `not_executed`
+- `decision_trace.final_state` should be `rejected`
+
+### Recovery semantics
+
+- `pending_approval`: HERALD produced a bounded plan and is waiting for human input
+- `rejected`: the operator rejected the action, so nothing executed
+- `recovered`: the approved action executed and verification confirmed recovery
+- `rolled_back`: HERALD executed a bounded rollback after a failed restart path and recovery was restored
+- `escalated`: HERALD halted, execution failed, rollout did not converge, or recovery could not be verified safely
 
 ### Optional Gemini Comparison
 
@@ -390,3 +427,36 @@ print(judge_state["judge_verdict"])
 print(judge_state["judge_reason"])
 PY
 ```
+
+---
+
+## Evaluation Harness
+
+HERALD now includes a replay runner that writes machine-readable artifacts and a
+metrics summary for deterministic scenario replays.
+
+Run one success path plus one failure path:
+
+```bash
+./.venv/bin/python -m evaluation.run_scenario \
+  --scenario evaluation/scenarios/crashloop_recovered.json \
+  --scenario evaluation/scenarios/crashloop_worker_failure.json \
+  --runs 1 \
+  --output-dir /tmp/herald-eval
+```
+
+This writes:
+
+- one JSON artifact per replayed run
+- `metrics-summary.json`
+- `metrics-summary.md`
+
+The current metrics include:
+
+- recommendation top-1 / top-2 rate
+- approval policy correctness
+- execution success rate
+- verification correctness
+- false recovery rate
+- `DecisionTrace` coverage
+- median and p95 recovery latency

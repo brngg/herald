@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from schemas.decision_trace import DecisionTrace
+from schemas.decision_trace import DecisionTrace, FinalState, HumanApproval
 from schemas.incident import Incident
 from schemas.remediation import RemediationAction
 
@@ -65,7 +65,7 @@ def route_crashloop_plan(
 
     return HITLDecision(
         routing_decision=routing_decision,
-        requires_approval=bool(ranked_actions),
+        requires_approval=routing_decision != "halt" and bool(ranked_actions),
         recommended_action=recommended_action,
         candidate_actions=ranked_actions,
         decision_trace=trace,
@@ -75,8 +75,8 @@ def route_crashloop_plan(
 def record_human_approval(
     trace: DecisionTrace,
     *,
-    human_approval: str,
-    final_state: str | None = None,
+    human_approval: HumanApproval,
+    final_state: FinalState | None = None,
 ) -> DecisionTrace:
     return DecisionTrace(
         incident_id=trace.incident_id,
@@ -84,7 +84,7 @@ def record_human_approval(
         judge_verdict=trace.judge_verdict,
         judge_reason=trace.judge_reason,
         routing_decision=trace.routing_decision,
-        human_approval=human_approval,  # type: ignore[arg-type]
+        human_approval=human_approval,
         execution_result=trace.execution_result,
         verification_result=trace.verification_result,
         rollback_triggered=trace.rollback_triggered,
@@ -97,7 +97,7 @@ def finalize_decision_trace(
     *,
     execution_result: dict[str, Any],
     verification_result: dict[str, Any],
-    final_state: str,
+    final_state: FinalState,
     rollback_triggered: bool = False,
 ) -> DecisionTrace:
     return DecisionTrace(

@@ -1,0 +1,11 @@
+{
+  "scenario_id": "crashloop_rejected",
+  "description": "The operator rejects the recommended crashloop action before execution.",
+  "payload_file": "payloads/crashloop_alert.json",
+  "reject_action_id": "rollout_undo_cartservice",
+  "expected": {
+    "top_action_id": "rollout_undo_cartservice",
+    "requires_approval": true,
+    "final_state": "rejected"
+  }
+}

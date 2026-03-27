@@ -71,13 +71,16 @@ def _worker_client(
         import sys
 
         dispatch = json.load(sys.stdin)
+        command = ["kubectl", "rollout", "undo", "deployment/cartservice", "-n", "default"]
+        if dispatch["action_type"] == "rollout_restart_deployment":
+            command = ["kubectl", "rollout", "restart", "deployment/cartservice", "-n", "default"]
         result = {{
             "worker_id": dispatch["worker_id"],
             "action_id": dispatch["action_id"],
             "status": {status!r},
             "started_at": "2026-03-27T03:00:00+00:00",
             "finished_at": "2026-03-27T03:00:05+00:00",
-            "command": ["kubectl", "rollout", "undo", "deployment/cartservice", "-n", "default"],
+            "command": command,
             "returncode": {returncode},
             "stdout": {stdout!r},
             "stderr": {stderr!r},
@@ -312,8 +315,8 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
             "Agent failed to complete the approved remediation.",
         )
         self.assertNotIn("rollout_status", trace.execution_result)
-        self.assertEqual(trace.verification_result["post_check"]["status"], "unrecovered")
-        self.assertEqual(trace.final_state, "unrecovered")
+        self.assertEqual(trace.verification_result["post_check"]["status"], "not_run")
+        self.assertEqual(trace.final_state, "escalated")
         self.assertEqual(commands, [])
 
     def test_workflow_uses_kubernetes_fallback_when_prometheus_ready_lags(self) -> None:
@@ -383,7 +386,86 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
             ],
         )
 
-    def test_workflow_refuses_execution_when_hitl_gate_halts(self) -> None:
+    def test_workflow_marks_rejected_when_human_rejects_action(self) -> None:
+        result = run_crashloop_recovery_from_payload(
+            _crashloop_payload(),
+            reject_action_id="rollout_undo_cartservice",
+        )
+
+        trace = result["decision_trace"]
+
+        self.assertEqual(trace.human_approval, "rejected")
+        self.assertEqual(trace.execution_result["status"], "not_executed")
+        self.assertEqual(trace.verification_result["status"], "not_run")
+        self.assertEqual(trace.final_state, "rejected")
+        self.assertFalse(trace.rollback_triggered)
+
+    def test_workflow_triggers_bounded_rollback_after_restart_verification_failure(self) -> None:
+        commands: list[list[str]] = []
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            if command[:3] == ["kubectl", "rollout", "status"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout='deployment "cartservice" successfully rolled out\n',
+                    stderr="",
+                )
+            if command[:3] == ["kubectl", "rollout", "undo"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout="deployment.apps/cartservice rolled back\n",
+                    stderr="",
+                )
+            raise AssertionError(f"Unexpected command: {command}")
+
+        crashloop_queries = iter([1.0, 1.0, 0.0])
+        ready_queries = iter([0.0, 1.0])
+
+        def query_runner(query: str) -> float:
+            if "kube_pod_container_status_waiting_reason" in query:
+                return next(crashloop_queries)
+            if "kube_pod_status_ready" in query:
+                return next(ready_queries)
+            raise AssertionError(f"Unexpected query: {query}")
+
+        prometheus = PrometheusClient(
+            query_runner=query_runner,
+            post_check_retry_attempts=1,
+            post_check_retry_sleep_seconds=0.0,
+            sleep_fn=lambda _: None,
+        )
+        kubernetes = KubernetesClient(runner=runner)
+        worker_client = _worker_client(stdout="deployment.apps/cartservice restarted\n")
+
+        result = run_crashloop_recovery_from_payload(
+            _crashloop_payload(),
+            approve_action_id="restart_cartservice",
+            kubernetes_client=kubernetes,
+            prometheus_client=prometheus,
+            execution_worker_client=worker_client,
+        )
+
+        trace = result["decision_trace"]
+
+        self.assertTrue(trace.rollback_triggered)
+        self.assertEqual(trace.execution_result["rollback"]["status"], "succeeded")
+        self.assertEqual(trace.execution_result["rollback"]["action_type"], "rollout_undo_deployment")
+        self.assertEqual(trace.verification_result["post_check"]["status"], "unrecovered")
+        self.assertEqual(trace.verification_result["post_rollback_check"]["status"], "recovered")
+        self.assertEqual(trace.final_state, "rolled_back")
+        self.assertEqual(
+            commands,
+            [
+                ["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=300s"],
+                ["kubectl", "rollout", "undo", "deployment/cartservice", "-n", "default"],
+                ["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=300s"],
+            ],
+        )
+
+    def test_workflow_returns_escalated_trace_when_hitl_gate_halts(self) -> None:
         class FailingJudgeLLM:
             def evaluate(self, **_: object) -> JudgeLLMResult:
                 return JudgeLLMResult(
@@ -391,12 +473,17 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
                     reason="Judge LLM blocked the plan.",
                 )
 
-        with self.assertRaisesRegex(ValueError, "HITL Gate halted"):
-            run_crashloop_recovery_from_payload(
-                _crashloop_payload(),
-                approve_action_id="rollout_undo_cartservice",
-                judge_llm=FailingJudgeLLM(),
-            )
+        result = run_crashloop_recovery_from_payload(
+            _crashloop_payload(),
+            judge_llm=FailingJudgeLLM(),
+        )
+
+        trace = result["decision_trace"]
+
+        self.assertEqual(trace.final_state, "escalated")
+        self.assertEqual(trace.execution_result["status"], "halted")
+        self.assertEqual(trace.verification_result["status"], "not_run")
+        self.assertFalse(result["hitl_decision"]["requires_approval"])
 
 
 if __name__ == "__main__":

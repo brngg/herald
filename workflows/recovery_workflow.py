@@ -30,12 +30,16 @@ def run_crashloop_recovery_from_payload(
     payload: dict[str, Any],
     *,
     approve_action_id: str | None = None,
+    reject_action_id: str | None = None,
     fixer_llm: Any = None,
     judge_llm: Any = None,
     kubernetes_client: KubernetesClient | None = None,
     prometheus_client: PrometheusClient | None = None,
     execution_worker_client: ExecutionWorkerClient | None = None,
 ) -> dict[str, Any]:
+    if approve_action_id and reject_action_id:
+        raise ValueError("Specify either approve_action_id or reject_action_id, not both.")
+
     incidents = incidents_from_alertmanager_payload(payload)
     if len(incidents) != 1:
         raise ValueError("Crashloop recovery demo expects exactly one incident per payload.")
@@ -58,17 +62,78 @@ def run_crashloop_recovery_from_payload(
         judge_reason=judge_state["judge_reason"],
     )
 
-    if approve_action_id is None:
+    if approve_action_id is None and reject_action_id is None:
+        decision_trace = hitl_decision.decision_trace
+        if hitl_decision.routing_decision == "halt":
+            decision_trace = finalize_decision_trace(
+                decision_trace,
+                execution_result={
+                    "status": "halted",
+                    "reason": "HITL Gate escalated the plan before execution.",
+                },
+                verification_result={
+                    "status": "not_run",
+                    "reason": "Execution did not start because the HITL Gate halted the plan.",
+                },
+                final_state="escalated",
+            )
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
             judge_state=judge_state,
             hitl_decision=hitl_decision,
-            decision_trace=hitl_decision.decision_trace,
+            decision_trace=decision_trace,
         )
 
     if hitl_decision.routing_decision == "halt":
-        raise ValueError("HITL Gate halted the plan; crashloop execution is not allowed.")
+        trace = finalize_decision_trace(
+            hitl_decision.decision_trace,
+            execution_result={
+                "status": "halted",
+                "reason": "HITL Gate escalated the plan before execution.",
+            },
+            verification_result={
+                "status": "not_run",
+                "reason": "Execution did not start because the HITL Gate halted the plan.",
+            },
+            final_state="escalated",
+        )
+        return _build_result(
+            incident=incident,
+            fixer_state=fixer_state,
+            judge_state=judge_state,
+            hitl_decision=hitl_decision,
+            decision_trace=trace,
+        )
+
+    if reject_action_id is not None:
+        rejected_action = _select_action(hitl_decision, reject_action_id)
+        trace = record_human_approval(
+            hitl_decision.decision_trace,
+            human_approval="rejected",
+            final_state="rejected",
+        )
+        trace = finalize_decision_trace(
+            trace,
+            execution_result={
+                "status": "not_executed",
+                "action_id": rejected_action.action_id,
+                "action_type": rejected_action.action_type,
+                "reason": "Human rejected the proposed remediation action.",
+            },
+            verification_result={
+                "status": "not_run",
+                "reason": "Execution was skipped because the human operator rejected the proposed action.",
+            },
+            final_state="rejected",
+        )
+        return _build_result(
+            incident=incident,
+            fixer_state=fixer_state,
+            judge_state=judge_state,
+            hitl_decision=hitl_decision,
+            decision_trace=trace,
+        )
 
     approved_action = _select_action(hitl_decision, approve_action_id)
     trace = record_human_approval(
@@ -115,11 +180,69 @@ def run_crashloop_recovery_from_payload(
         dispatch=dispatch,
         worker_result=worker_result,
     )
-    if execution_result["status"] == "succeeded":
-        execution_result["rollout_status"] = kubernetes.wait_for_rollout_deployment(
+    if execution_result["status"] != "succeeded":
+        trace = finalize_decision_trace(
+            trace,
+            execution_result=execution_result,
+            verification_result={
+                "pre_check": pre_check,
+                "post_check": {
+                    "status": "not_run",
+                    "reason": "Post-check did not run because the execution worker failed before rollout verification.",
+                },
+            },
+            final_state="escalated",
+        )
+        return _build_result(
+            incident=incident,
+            fixer_state=fixer_state,
+            judge_state=judge_state,
+            hitl_decision=hitl_decision,
+            decision_trace=trace,
+        )
+
+    execution_result["rollout_status"] = kubernetes.wait_for_rollout_deployment(
+        namespace=namespace,
+        deployment=deployment,
+    )
+    rollout_status = execution_result["rollout_status"]
+    if rollout_status["status"] != "succeeded":
+        rollback_triggered, rollback_result, post_rollback_check = _attempt_bounded_rollback(
+            action=approved_action,
+            kubernetes=kubernetes,
+            prometheus=prometheus,
             namespace=namespace,
             deployment=deployment,
+            failure_reason="Approved action rollout did not converge.",
         )
+        if rollback_result is not None:
+            execution_result["rollback"] = rollback_result
+        verification_result = {
+            "pre_check": pre_check,
+            "post_check": {
+                "status": "not_run",
+                "reason": "Post-check did not run because rollout convergence failed after execution.",
+            },
+        }
+        if post_rollback_check is not None:
+            verification_result["post_rollback_check"] = post_rollback_check
+        final_state = "rolled_back" if post_rollback_check and post_rollback_check["status"] == "recovered" else "escalated"
+        verification_result["recovery_latency_seconds"] = _recovery_latency_seconds(dispatch.requested_at)
+        trace = finalize_decision_trace(
+            trace,
+            execution_result=execution_result,
+            verification_result=verification_result,
+            final_state=final_state,
+            rollback_triggered=rollback_triggered,
+        )
+        return _build_result(
+            incident=incident,
+            fixer_state=fixer_state,
+            judge_state=judge_state,
+            hitl_decision=hitl_decision,
+            decision_trace=trace,
+        )
+
     post_check = prometheus.post_check_crashloop(namespace=namespace, deployment=deployment)
     post_check = _apply_kubernetes_recovery_fallback(
         post_check=post_check,
@@ -128,12 +251,32 @@ def run_crashloop_recovery_from_payload(
         namespace=namespace,
         deployment=deployment,
     )
-    final_state = "recovered" if post_check["status"] == "recovered" else "unrecovered"
+    rollback_triggered, rollback_result, post_rollback_check = _attempt_bounded_rollback(
+        action=approved_action,
+        kubernetes=kubernetes,
+        prometheus=prometheus,
+        namespace=namespace,
+        deployment=deployment,
+        failure_reason="Post-check verification did not confirm recovery.",
+    ) if post_check["status"] != "recovered" else (False, None, None)
+    if rollback_result is not None:
+        execution_result["rollback"] = rollback_result
+    final_state = "recovered"
+    if post_check["status"] != "recovered":
+        if post_rollback_check is not None and post_rollback_check["status"] == "recovered":
+            final_state = "rolled_back"
+        else:
+            final_state = "escalated"
+    verification_result = {"pre_check": pre_check, "post_check": post_check}
+    if post_rollback_check is not None:
+        verification_result["post_rollback_check"] = post_rollback_check
+    verification_result["recovery_latency_seconds"] = _recovery_latency_seconds(dispatch.requested_at)
     trace = finalize_decision_trace(
         trace,
         execution_result=execution_result,
-        verification_result={"pre_check": pre_check, "post_check": post_check},
+        verification_result=verification_result,
         final_state=final_state,
+        rollback_triggered=rollback_triggered,
     )
     return _build_result(
         incident=incident,
@@ -277,12 +420,67 @@ def _apply_kubernetes_recovery_fallback(
     return updated_post_check
 
 
+def _attempt_bounded_rollback(
+    *,
+    action: RemediationAction,
+    kubernetes: KubernetesClient,
+    prometheus: PrometheusClient,
+    namespace: str,
+    deployment: str,
+    failure_reason: str,
+) -> tuple[bool, dict[str, object] | None, dict[str, object] | None]:
+    if action.action_type != "rollout_restart_deployment":
+        return False, None, None
+
+    rollback_result = kubernetes.rollout_undo_deployment(
+        namespace=namespace,
+        deployment=deployment,
+    )
+    rollback_record: dict[str, object] = {
+        "status": rollback_result["status"],
+        "reason": failure_reason,
+        "action_type": "rollout_undo_deployment",
+        "namespace": namespace,
+        "deployment": deployment,
+        "command": rollback_result["command"],
+        "returncode": rollback_result["returncode"],
+        "stdout": rollback_result["stdout"],
+        "stderr": rollback_result["stderr"],
+    }
+    if rollback_result["status"] != "succeeded":
+        return True, rollback_record, None
+
+    rollback_record["rollout_status"] = kubernetes.wait_for_rollout_deployment(
+        namespace=namespace,
+        deployment=deployment,
+    )
+    rollback_rollout_status = rollback_record["rollout_status"]
+    if not isinstance(rollback_rollout_status, dict) or rollback_rollout_status.get("status") != "succeeded":
+        return True, rollback_record, None
+
+    post_rollback_check = prometheus.post_check_crashloop(namespace=namespace, deployment=deployment)
+    post_rollback_check = _apply_kubernetes_recovery_fallback(
+        post_check=post_rollback_check,
+        execution_result={"rollout_status": rollback_rollout_status},
+        kubernetes=kubernetes,
+        namespace=namespace,
+        deployment=deployment,
+    )
+    return True, rollback_record, post_rollback_check
+
+
+def _recovery_latency_seconds(requested_at: str) -> float:
+    started = datetime.fromisoformat(requested_at)
+    return max(0.0, (datetime.now(UTC) - started).total_seconds())
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the crashloop recovery workflow from an Alertmanager payload."
     )
     parser.add_argument("--payload-file", required=True)
     parser.add_argument("--approve-action-id")
+    parser.add_argument("--reject-action-id")
     parser.add_argument(
         "--fixer-provider",
         choices=("heuristic", "gemini"),
@@ -327,6 +525,7 @@ def main() -> int:
     result = run_crashloop_recovery_from_payload(
         payload,
         approve_action_id=args.approve_action_id,
+        reject_action_id=args.reject_action_id,
         fixer_llm=fixer_llm,
         judge_llm=judge_llm,
         prometheus_client=prometheus_client,

@@ -1,0 +1,24 @@
+{
+  "scenario_id": "crashloop_worker_failure",
+  "description": "The execution worker fails after approval, so the workflow escalates.",
+  "payload_file": "payloads/crashloop_alert.json",
+  "approve_action_id": "rollout_undo_cartservice",
+  "prometheus": {
+    "crashloop_values": [1.0],
+    "ready_values": [],
+    "pre_check_retry_attempts": 1,
+    "post_check_retry_attempts": 1
+  },
+  "worker_result": {
+    "status": "failed",
+    "returncode": 1,
+    "stdout": "",
+    "stderr": "worker failed",
+    "summary": "Agent failed to complete the approved remediation."
+  },
+  "expected": {
+    "top_action_id": "rollout_undo_cartservice",
+    "requires_approval": true,
+    "final_state": "escalated"
+  }
+}

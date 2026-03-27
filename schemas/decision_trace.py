@@ -5,9 +5,27 @@ from typing import Any, Literal
 
 HumanApproval = Literal["approved", "rejected", "n/a"]
 JudgeVerdict = Literal["pass", "fail", "n/a"]
+FinalState = Literal[
+    "pending_approval",
+    "executing",
+    "recovered",
+    "unrecovered",
+    "escalated",
+    "rolled_back",
+    "rejected",
+]
 
 VALID_HUMAN_APPROVALS: tuple[HumanApproval, ...] = ("approved", "rejected", "n/a")
 VALID_JUDGE_VERDICTS: tuple[JudgeVerdict, ...] = ("pass", "fail", "n/a")
+VALID_FINAL_STATES: tuple[FinalState, ...] = (
+    "pending_approval",
+    "executing",
+    "recovered",
+    "unrecovered",
+    "escalated",
+    "rolled_back",
+    "rejected",
+)
 
 @dataclass(slots=True)
 class DecisionTrace:
@@ -20,7 +38,7 @@ class DecisionTrace:
     execution_result: dict[str, Any]  # or str for v0
     verification_result: dict[str, Any]  # or str for v0
     rollback_triggered: bool
-    final_state: str
+    final_state: FinalState
 
     def __post_init__(self) -> None:
         if not isinstance(self.incident_id, str):
@@ -47,7 +65,5 @@ class DecisionTrace:
             raise TypeError("verification_result must be a dict")
         if not isinstance(self.rollback_triggered, bool):
             raise TypeError("rollback_triggered must be a bool")
-        if not isinstance(self.final_state, str):
-            raise TypeError("final_state must be a str")
-        if not self.final_state:
-            raise ValueError("final_state must be non-empty")
+        if self.final_state not in VALID_FINAL_STATES:
+            raise ValueError(f"unsupported final_state: {self.final_state}")

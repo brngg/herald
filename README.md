@@ -86,13 +86,14 @@ Current implementation is strongest in:
 - live Gemini-backed Fixer plan generation for the `crashloop` slice
 - Judge contract, safety checks, and Gemini comparison path for the `crashloop` slice
 - HITL Gate routing and `DecisionTrace` assembly for the `crashloop` slice
-- bounded crashloop execution via `kubectl rollout undo|restart`
-- pre-check and post-check verification for the `crashloop` slice
-- an in-process crashloop recovery workflow entrypoint
+- a spawned Gemini-backed execution agent for the `crashloop` slice
+- bounded crashloop execution through typed Kubernetes tools inside the execution agent
+- pre-check and post-check verification for the `crashloop` slice, including Kubernetes-aware fallback when Prometheus readiness lags after rollout
+- a live-validated crashloop recovery workflow entrypoint
 
 Still not implemented end to end:
 
-- rollback behavior
+- rollback behavior after failed post-check
 - durable workflow orchestration
 - Slack-based approval flow
 - evaluation harness
@@ -214,8 +215,18 @@ vertical slice on `cartservice`. It runs:
 - HITL Gate routing
 - `DecisionTrace` assembly
 - pre-check verification
-- bounded execution for rollout undo or rollout restart
+- spawned Gemini execution agent for bounded rollout undo or rollout restart
 - post-check verification
+
+The current live demo has been validated end to end on minikube:
+
+- apply the intentional bad deploy
+- wait for `cartservice` to enter `CrashLoopBackOff`
+- run the first HERALD pass to reach `pending_approval`
+- approve `rollout_undo_cartservice`
+- let the spawned Gemini execution agent execute the approved rollback
+- wait for rollout completion and verify recovery
+- finish with `decision_trace.final_state = recovered`
 
 ### Fastest Demo Path
 

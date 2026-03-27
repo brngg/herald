@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import subprocess
 import sys
 import textwrap
@@ -113,6 +114,12 @@ class ExecutionWorkerTest(unittest.TestCase):
             import sys
 
             dispatch = json.load(sys.stdin)
+            sys.stderr.write("[HERALD %s] spawned Gemini execution agent pid=999 action_type=%s action_id=%s\\n" % (
+                dispatch["worker_id"],
+                dispatch["action_type"],
+                dispatch["action_id"],
+            ))
+            sys.stderr.flush()
             result = {
                 "worker_id": dispatch["worker_id"],
                 "action_id": dispatch["action_id"],
@@ -130,8 +137,10 @@ class ExecutionWorkerTest(unittest.TestCase):
             """
         ).strip()
 
+        event_stream = io.StringIO()
         client = ExecutionWorkerClient(
             worker_command_builder=lambda _: [sys.executable, "-c", script],
+            event_stream=event_stream,
         )
         dispatch = ExecutionDispatch(
             incident_id="incident-123",
@@ -156,6 +165,7 @@ class ExecutionWorkerTest(unittest.TestCase):
         self.assertEqual(result.action_id, "rollout_undo_cartservice")
         self.assertEqual(result.status, "succeeded")
         self.assertEqual(result.summary, "Agent executed the approved rollback.")
+        self.assertIn("spawned Gemini execution agent", event_stream.getvalue())
 
     def test_execute_dispatch_surfaces_model_failure_as_structured_result(self) -> None:
         dispatch = ExecutionDispatch(

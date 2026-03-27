@@ -188,6 +188,51 @@ class GeminiExecutionAgentTest(unittest.TestCase):
         self.assertEqual(status, "failed")
         self.assertIn("exceeded max_steps", summary)
 
+    def test_agent_emits_lifecycle_events_without_exposing_reasoning(self) -> None:
+        events: list[tuple[str, dict[str, object]]] = []
+        agent = GeminiExecutionAgent(
+            llm=_FakeExecutionAgentLLM(
+                [
+                    ExecutionAgentDecision(
+                        decision_type="tool_call",
+                        tool_name="get_deployment_context",
+                        arguments={"namespace": "default", "deployment": "cartservice"},
+                        status="failed",
+                        summary="Inspect before acting.",
+                    ),
+                    ExecutionAgentDecision(
+                        decision_type="finish",
+                        tool_name="",
+                        arguments={},
+                        status="failed",
+                        summary="Stopping after inspection.",
+                    ),
+                ]
+            )
+        )
+
+        agent.run(
+            dispatch=_dispatch(),
+            tools=_tools(),
+            event_logger=lambda event_type, payload: events.append((event_type, dict(payload))),
+        )
+
+        self.assertEqual(
+            [event_type for event_type, _ in events],
+            [
+                "agent_started",
+                "agent_step_started",
+                "agent_decision",
+                "tool_call_started",
+                "tool_call_finished",
+                "agent_step_started",
+                "agent_decision",
+                "agent_finished",
+            ],
+        )
+        self.assertEqual(events[2][1]["tool_name"], "get_deployment_context")
+        self.assertNotIn("summary", events[2][1])
+
     def test_agent_failure_surfaces_model_error(self) -> None:
         agent = GeminiExecutionAgent(llm=_FakeExecutionAgentLLM(error=ValueError("malformed output")))
 

@@ -4,10 +4,11 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Mapping, Sequence, TextIO
 
 from schemas.execution import (
     ExecutionDispatch,
@@ -34,6 +35,8 @@ class ExecutionWorkerHandle:
     dispatch: ExecutionDispatch
     command: list[str]
     process: subprocess.Popen[str]
+    stderr_lines: list[str]
+    stderr_thread: threading.Thread | None
 
 
 @dataclass(slots=True)
@@ -41,6 +44,7 @@ class ExecutionWorkerClient:
     worker_command_builder: WorkerCommandBuilder | None = None
     cwd: str | None = None
     env: Mapping[str, str] | None = None
+    event_stream: TextIO | None = None
 
     def dispatch_execution_worker(self, dispatch: ExecutionDispatch) -> ExecutionWorkerHandle:
         command = list((self.worker_command_builder or _default_worker_command_builder)(dispatch))
@@ -53,6 +57,15 @@ class ExecutionWorkerClient:
             cwd=self.cwd or _default_worker_cwd(),
             env=_merged_env(self.env),
         )
+        stderr_lines: list[str] = []
+        stderr_thread: threading.Thread | None = None
+        if process.stderr is not None:
+            stderr_thread = threading.Thread(
+                target=_relay_worker_stderr,
+                args=(process.stderr, stderr_lines, self.event_stream or sys.stderr),
+                daemon=True,
+            )
+            stderr_thread.start()
         if process.stdin is None:
             process.kill()
             raise RuntimeError("Execution worker did not expose stdin.")
@@ -63,16 +76,19 @@ class ExecutionWorkerClient:
             dispatch=dispatch,
             command=command,
             process=process,
+            stderr_lines=stderr_lines,
+            stderr_thread=stderr_thread,
         )
 
     def collect_execution_result(self, handle: ExecutionWorkerHandle) -> ExecutionResult:
-        if handle.process.stdout is None or handle.process.stderr is None:
+        if handle.process.stdout is None:
             raise RuntimeError("Execution worker did not expose stdout/stderr.")
         stdout = handle.process.stdout.read()
-        stderr = handle.process.stderr.read()
         handle.process.stdout.close()
-        handle.process.stderr.close()
         handle.process.wait()
+        if handle.stderr_thread is not None:
+            handle.stderr_thread.join(timeout=1.0)
+        stderr = "".join(handle.stderr_lines)
         if stdout.strip():
             try:
                 payload = json.loads(stdout)
@@ -100,13 +116,31 @@ def execute_dispatch(
     kubernetes = kubernetes_client or KubernetesClient()
     agent = GeminiExecutionAgent(llm=llm or _default_execution_llm())
     tools = _build_execution_tools(kubernetes)
+    _emit_worker_event(
+        "worker_spawned",
+        {
+            "worker_id": dispatch.worker_id,
+            "action_id": dispatch.action_id,
+            "action_type": dispatch.action_type,
+            "pid": os.getpid(),
+        },
+    )
 
     try:
         status, summary, command, returncode, stdout, stderr, tool_transcript = agent.run(
             dispatch=dispatch,
             tools=tools,
+            event_logger=_emit_worker_event,
         )
     except Exception as exc:
+        _emit_worker_event(
+            "worker_exited",
+            {
+                "worker_id": dispatch.worker_id,
+                "action_id": dispatch.action_id,
+                "status": "failed",
+            },
+        )
         return _build_failed_result(
             dispatch=dispatch,
             summary=f"Gemini execution agent failed before completing the approved action: {exc}",
@@ -117,7 +151,7 @@ def execute_dispatch(
             started_at=started_at,
         )
 
-    return ExecutionResult(
+    result = ExecutionResult(
         worker_id=dispatch.worker_id,
         action_id=dispatch.action_id,
         status=status,
@@ -130,6 +164,15 @@ def execute_dispatch(
         summary=summary,
         tool_transcript=tool_transcript,
     )
+    _emit_worker_event(
+        "worker_exited",
+        {
+            "worker_id": dispatch.worker_id,
+            "action_id": dispatch.action_id,
+            "status": result.status,
+        },
+    )
+    return result
 
 
 def main() -> int:
@@ -227,6 +270,57 @@ def _build_failed_result(
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _relay_worker_stderr(source: TextIO, sink_lines: list[str], sink: TextIO) -> None:
+    try:
+        for line in source:
+            sink_lines.append(line)
+            sink.write(line)
+            sink.flush()
+    finally:
+        source.close()
+
+
+def _emit_worker_event(event_type: str, payload: dict[str, object]) -> None:
+    worker_id = str(payload.get("worker_id", "unknown-worker"))
+    action_id = str(payload.get("action_id", "unknown-action"))
+    message = _format_worker_event_message(event_type, payload)
+    sys.stderr.write(f"[HERALD {worker_id}] {message} action_id={action_id}\n")
+    sys.stderr.flush()
+
+
+def _format_worker_event_message(event_type: str, payload: dict[str, object]) -> str:
+    if event_type == "worker_spawned":
+        return (
+            "spawned Gemini execution agent "
+            f"pid={payload.get('pid')} action_type={payload.get('action_type')}"
+        )
+    if event_type == "agent_started":
+        allowed_tools = payload.get("allowed_tool_names", [])
+        return f"agent started allowed_tools={allowed_tools} max_steps={payload.get('max_steps')}"
+    if event_type == "agent_step_started":
+        return f"step {payload.get('step')} deciding next tool"
+    if event_type == "agent_decision":
+        decision_type = payload.get("decision_type")
+        tool_name = payload.get("tool_name")
+        if decision_type == "finish":
+            return f"step {payload.get('step')} returned finish"
+        return f"step {payload.get('step')} requested tool={tool_name}"
+    if event_type == "tool_call_started":
+        return f"step {payload.get('step')} running tool={payload.get('tool_name')}"
+    if event_type == "tool_call_finished":
+        return (
+            f"step {payload.get('step')} completed tool={payload.get('tool_name')} "
+            f"status={payload.get('status')}"
+        )
+    if event_type == "tool_call_failed":
+        return f"step {payload.get('step')} failed tool={payload.get('tool_name')}"
+    if event_type == "agent_finished":
+        return f"agent finished status={payload.get('status')}"
+    if event_type == "worker_exited":
+        return f"worker exited status={payload.get('status')}"
+    return f"{event_type} payload={payload}"
 
 
 if __name__ == "__main__":

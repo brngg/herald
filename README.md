@@ -225,6 +225,7 @@ The current live demo has been validated end to end on minikube:
 - run the first HERALD pass to reach `pending_approval`
 - approve `rollout_undo_cartservice`
 - let the spawned Gemini execution agent execute the approved rollback
+- watch the spawned worker report its lifecycle and tool calls live in the terminal
 - wait for rollout completion and verify recovery
 - finish with `decision_trace.final_state = recovered`
 
@@ -243,6 +244,31 @@ That helper:
 - runs the first HERALD pass
 - saves the first-pass JSON to `/tmp/herald-crashloop-plan.json`
 - prints the exact approval command to run next
+
+### Live Execution View
+
+When you run the approval command, HERALD now streams the spawned execution worker lifecycle
+to the terminal on `stderr` while keeping the final structured workflow JSON on `stdout`.
+
+You will see messages like:
+
+```text
+[HERALD worker-...] spawned Gemini execution agent pid=...
+[HERALD worker-...] agent started allowed_tools=[...]
+[HERALD worker-...] step 1 deciding next tool
+[HERALD worker-...] step 1 requested tool=get_deployment_context
+[HERALD worker-...] step 1 running tool=get_deployment_context
+[HERALD worker-...] step 1 completed tool=get_deployment_context status=succeeded
+[HERALD worker-...] step 2 requested tool=rollout_undo_deployment
+[HERALD worker-...] step 2 running tool=rollout_undo_deployment
+[HERALD worker-...] step 2 completed tool=rollout_undo_deployment status=succeeded
+[HERALD worker-...] step 3 returned finish
+[HERALD worker-...] agent finished status=succeeded
+[HERALD worker-...] worker exited status=succeeded
+```
+
+This gives a visible execution trace for the spawned Gemini worker without exposing hidden
+chain-of-thought, and the final workflow JSON remains easy to save or parse separately.
 
 If the bad deploy is already active and you only want to run the first HERALD pass:
 

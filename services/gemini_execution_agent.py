@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from schemas.execution import ExecutionDispatch, ExecutionStatus, ExecutionToolName
 
@@ -43,6 +43,9 @@ class ExecutionAgentLLM(Protocol):
         dispatch: ExecutionDispatch,
         tool_transcript: list[dict[str, Any]],
     ) -> ExecutionAgentDecision: ...
+
+
+ExecutionAgentEventLogger = Callable[[str, dict[str, Any]], None]
 
 
 @dataclass(slots=True)
@@ -97,20 +100,57 @@ class GeminiExecutionAgent:
         *,
         dispatch: ExecutionDispatch,
         tools: dict[ExecutionToolName, ExecutionTool],
+        event_logger: ExecutionAgentEventLogger | None = None,
     ) -> tuple[ExecutionStatus, str, list[str], int, str, str, list[dict[str, Any]]]:
+        logger = event_logger or _noop_event_logger
         tool_transcript: list[dict[str, Any]] = []
         last_command: list[str] = []
         last_returncode = 0
         last_stdout = ""
         last_stderr = ""
         mutation_executed = False
+        logger(
+            "agent_started",
+            {
+                "worker_id": dispatch.worker_id,
+                "action_id": dispatch.action_id,
+                "max_steps": dispatch.max_steps,
+                "allowed_tool_names": list(dispatch.allowed_tool_names),
+            },
+        )
 
         for step_index in range(1, dispatch.max_steps + 1):
+            logger(
+                "agent_step_started",
+                {
+                    "worker_id": dispatch.worker_id,
+                    "action_id": dispatch.action_id,
+                    "step": step_index,
+                },
+            )
             decision = self.llm.decide_next_step(dispatch=dispatch, tool_transcript=tool_transcript)
+            logger(
+                "agent_decision",
+                {
+                    "worker_id": dispatch.worker_id,
+                    "action_id": dispatch.action_id,
+                    "step": step_index,
+                    "decision_type": decision.decision_type,
+                    "tool_name": decision.tool_name,
+                },
+            )
 
             if decision.decision_type == "finish":
                 if decision.status == "succeeded":
                     if not mutation_executed:
+                        logger(
+                            "agent_finished",
+                            {
+                                "worker_id": dispatch.worker_id,
+                                "action_id": dispatch.action_id,
+                                "status": "failed",
+                            },
+                        )
                         return (
                             "failed",
                             "Gemini execution agent finished successfully before executing the approved action.",
@@ -121,6 +161,14 @@ class GeminiExecutionAgent:
                             tool_transcript,
                         )
                     if last_returncode != 0:
+                        logger(
+                            "agent_finished",
+                            {
+                                "worker_id": dispatch.worker_id,
+                                "action_id": dispatch.action_id,
+                                "status": "failed",
+                            },
+                        )
                         return (
                             "failed",
                             "Gemini execution agent reported success but the approved action failed.",
@@ -130,6 +178,14 @@ class GeminiExecutionAgent:
                             last_stderr,
                             tool_transcript,
                         )
+                logger(
+                    "agent_finished",
+                    {
+                        "worker_id": dispatch.worker_id,
+                        "action_id": dispatch.action_id,
+                        "status": decision.status,
+                    },
+                )
                 return (
                     decision.status,
                     decision.summary.strip(),
@@ -141,6 +197,14 @@ class GeminiExecutionAgent:
                 )
 
             if decision.tool_name not in dispatch.allowed_tool_names:
+                logger(
+                    "agent_finished",
+                    {
+                        "worker_id": dispatch.worker_id,
+                        "action_id": dispatch.action_id,
+                        "status": "failed",
+                    },
+                )
                 return (
                     "failed",
                     f"Gemini execution agent requested disallowed tool {decision.tool_name!r}.",
@@ -153,6 +217,14 @@ class GeminiExecutionAgent:
 
             tool = tools.get(decision.tool_name)
             if tool is None:
+                logger(
+                    "agent_finished",
+                    {
+                        "worker_id": dispatch.worker_id,
+                        "action_id": dispatch.action_id,
+                        "status": "failed",
+                    },
+                )
                 return (
                     "failed",
                     f"Gemini execution agent requested unknown tool {decision.tool_name!r}.",
@@ -164,8 +236,34 @@ class GeminiExecutionAgent:
                 )
 
             try:
+                logger(
+                    "tool_call_started",
+                    {
+                        "worker_id": dispatch.worker_id,
+                        "action_id": dispatch.action_id,
+                        "step": step_index,
+                        "tool_name": decision.tool_name,
+                    },
+                )
                 tool_result = tool.callable(**decision.arguments)
             except Exception as exc:
+                logger(
+                    "tool_call_failed",
+                    {
+                        "worker_id": dispatch.worker_id,
+                        "action_id": dispatch.action_id,
+                        "step": step_index,
+                        "tool_name": decision.tool_name,
+                    },
+                )
+                logger(
+                    "agent_finished",
+                    {
+                        "worker_id": dispatch.worker_id,
+                        "action_id": dispatch.action_id,
+                        "status": "failed",
+                    },
+                )
                 return (
                     "failed",
                     f"Gemini execution agent tool {decision.tool_name!r} failed: {exc}",
@@ -185,6 +283,16 @@ class GeminiExecutionAgent:
                     "result": compact_result,
                 }
             )
+            logger(
+                "tool_call_finished",
+                {
+                    "worker_id": dispatch.worker_id,
+                    "action_id": dispatch.action_id,
+                    "step": step_index,
+                    "tool_name": decision.tool_name,
+                    "status": compact_result.get("status", "unknown"),
+                },
+            )
 
             if tool.mutation:
                 mutation_executed = True
@@ -193,6 +301,14 @@ class GeminiExecutionAgent:
                 last_stdout = str(tool_result.get("stdout", ""))
                 last_stderr = str(tool_result.get("stderr", ""))
 
+        logger(
+            "agent_finished",
+            {
+                "worker_id": dispatch.worker_id,
+                "action_id": dispatch.action_id,
+                "status": "failed",
+            },
+        )
         return (
             "failed",
             f"Gemini execution agent exceeded max_steps={dispatch.max_steps} without finishing.",
@@ -305,6 +421,10 @@ def _truncate_text(value: str, limit: int = 400) -> str:
     if len(value) <= limit:
         return value
     return value[:limit] + "...<truncated>"
+
+
+def _noop_event_logger(_: str, __: dict[str, Any]) -> None:
+    return None
 
 
 def _extract_response_text(payload: dict[str, Any]) -> str:

@@ -61,7 +61,7 @@ def build_judge_prompts(
 ) -> tuple[str, str]:
     system_prompt = (
         "You are the Judge in a Kubernetes incident-response system called HERALD.\n"
-        "Evaluate the Fixer plan for the current crashloop incident slice.\n"
+        "Evaluate the Fixer plan for the current supported incident slice.\n"
         "Return pass only if the proposed plan is bounded, approval-gated, and reasonable.\n"
         "Return output strictly in the requested JSON schema."
     )
@@ -84,7 +84,7 @@ def build_judge_prompts(
         "fixer_rationale": fixer_rationale or "",
     }
     user_prompt = (
-        "Judge the following Fixer plan for the current crashloop slice.\n\n"
+        "Judge the following Fixer plan for the current incident slice.\n\n"
         f"{json.dumps(user_payload, sort_keys=True)}"
     )
     return system_prompt, user_prompt

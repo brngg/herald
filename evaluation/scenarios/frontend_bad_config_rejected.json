@@ -1,0 +1,16 @@
+{
+  "scenario_id": "frontend_bad_config_rejected",
+  "payload_file": "payloads/frontend_bad_config_alert.json",
+  "reject_action_id": "rollout_undo_frontend_bad_config",
+  "prometheus": {
+    "probe_values": [0.0],
+    "ready_values": [1.0],
+    "pre_check_retry_attempts": 1,
+    "post_check_retry_attempts": 1
+  },
+  "expected": {
+    "top_action_id": "rollout_undo_frontend_bad_config",
+    "requires_approval": true,
+    "final_state": "rejected"
+  }
+}

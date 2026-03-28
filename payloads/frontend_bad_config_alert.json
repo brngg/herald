@@ -1,0 +1,50 @@
+{
+  "receiver": "default/herald-webhook-routing/herald-webhook",
+  "status": "firing",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HeraldFrontendCartProbeFailed",
+        "herald": "true",
+        "incident_class": "bad_config",
+        "instance": "http://frontend.default.svc.cluster.local/cart",
+        "job": "probe/monitoring/herald-frontend-cart",
+        "namespace": "default",
+        "prometheus": "monitoring/monitoring-kube-prometheus-prometheus",
+        "severity": "critical"
+      },
+      "annotations": {
+        "description": "The synthetic /cart probe is failing.",
+        "summary": "frontend /cart probe is failing"
+      },
+      "startsAt": "2026-03-20T19:13:49.873Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://monitoring-kube-prometheus-prometheus.monitoring:9090/graph",
+      "fingerprint": "7f53ba61768c6182"
+    }
+  ],
+  "groupLabels": {
+    "alertname": "HeraldFrontendCartProbeFailed",
+    "incident_class": "bad_config",
+    "namespace": "default"
+  },
+  "commonLabels": {
+    "alertname": "HeraldFrontendCartProbeFailed",
+    "herald": "true",
+    "incident_class": "bad_config",
+    "instance": "http://frontend.default.svc.cluster.local/cart",
+    "job": "probe/monitoring/herald-frontend-cart",
+    "namespace": "default",
+    "prometheus": "monitoring/monitoring-kube-prometheus-prometheus",
+    "severity": "critical"
+  },
+  "commonAnnotations": {
+    "description": "The synthetic /cart probe is failing.",
+    "summary": "frontend /cart probe is failing"
+  },
+  "externalURL": "http://monitoring-kube-prometheus-alertmanager.monitoring:9093",
+  "version": "4",
+  "groupKey": "{}/{herald=\"true\",namespace=\"default\"}:{alertname=\"HeraldFrontendCartProbeFailed\"}",
+  "truncatedAlerts": 0
+}

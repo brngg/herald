@@ -144,15 +144,18 @@ HERALD is currently scoped to four incident classes:
 | Frontend bad cart config | User-facing HTTP failures from a bad `CART_SERVICE_ADDR` config |
 | Dependency network disruption | Network partition from `frontend` to `cartservice` |
 
-Live-verified chaos and alerting setup currently covers:
+Checked-in chaos and alerting coverage currently includes:
 
 - `crashloop-cartservice-bad-deploy.yaml`
 - `chaos-frontend-cpu-saturation.yaml`
+- `frontend-bad-cart-config.yaml`
 - `chaos-cartservice-network-partition.yaml`
 
-Pending final live verification:
-
-- `frontend-bad-cart-config.yaml` should keep the frontend process healthy while making `/cart` fail deterministically for users
+The crashloop and bad-config slices have been live-validated end to end in the local
+cluster. The CPU slice has also been live exercised through the new Gate 0/Gate 1
+watcher flow, but its sustained-high-load execution path is still timing-sensitive.
+The network slice is still part of the recommended bounded evaluation set, but is not
+implemented end to end yet.
 
 ---
 
@@ -172,13 +175,13 @@ Current implementation is strongest in:
 - pre-check and post-check verification for the `crashloop` slice, including Kubernetes-aware fallback when Prometheus readiness lags after rollout
 - a live-validated crashloop recovery workflow entrypoint
 - a full CPU saturation recovery slice for `frontend`, including Chaos Mesh deletion, approval-gated execution, and verification
-- replay artifacts and metrics for crashloop and CPU saturation scenarios
+- a live-validated frontend bad-config recovery slice for `frontend`, including the `/cart` probe alert, approval-gated rollout rollback, and verified recovery
+- replay artifacts and metrics for crashloop, CPU saturation, and bad-config scenarios
 
 Still not implemented end to end:
 
 - durable workflow orchestration
 - Slack-based approval flow
-- the remaining two incident classes
 
 Progress by phase:
 

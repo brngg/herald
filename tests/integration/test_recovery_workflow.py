@@ -79,9 +79,11 @@ def _worker_client(
         import sys
 
         dispatch = json.load(sys.stdin)
-        command = ["kubectl", "rollout", "undo", "deployment/cartservice", "-n", "default"]
+        deployment = dispatch["parameters"].get("deployment", "cartservice")
+        namespace = dispatch["parameters"].get("namespace", "default")
+        command = ["kubectl", "rollout", "undo", f"deployment/{{deployment}}", "-n", namespace]
         if dispatch["action_type"] == "rollout_restart_deployment":
-            command = ["kubectl", "rollout", "restart", "deployment/cartservice", "-n", "default"]
+            command = ["kubectl", "rollout", "restart", f"deployment/{{deployment}}", "-n", namespace]
         elif dispatch["action_type"] == "delete_stresschaos":
             command = ["kubectl", "delete", "stresschaos", dispatch["parameters"]["name"], "-n", dispatch["parameters"]["namespace"]]
         result = {{
@@ -144,6 +146,54 @@ def _cpu_payload() -> dict[str, object]:
         "externalURL": "http://alertmanager",
         "version": "4",
         "groupKey": '{}/{namespace="default"}:{alertname="HeraldFrontendHighCPU"}',
+        "truncatedAlerts": 0,
+    }
+
+
+def _bad_config_payload() -> dict[str, object]:
+    return {
+        "receiver": "default/herald-webhook-routing/herald-webhook",
+        "status": "firing",
+        "alerts": [
+            {
+                "status": "firing",
+                "labels": {
+                    "alertname": "HeraldFrontendCartProbeFailed",
+                    "incident_class": "bad_config",
+                    "instance": "http://frontend.default.svc.cluster.local/cart",
+                    "job": "probe/monitoring/herald-frontend-cart",
+                    "namespace": "default",
+                    "severity": "critical",
+                },
+                "annotations": {
+                    "summary": "frontend /cart probe is failing",
+                    "description": "The synthetic /cart probe is failing.",
+                },
+                "startsAt": "2026-03-23T20:00:00Z",
+                "endsAt": "0001-01-01T00:00:00Z",
+                "generatorURL": "http://prometheus/graph",
+                "fingerprint": "badconfig123",
+            }
+        ],
+        "groupLabels": {
+            "alertname": "HeraldFrontendCartProbeFailed",
+            "incident_class": "bad_config",
+            "namespace": "default",
+        },
+        "commonLabels": {
+            "alertname": "HeraldFrontendCartProbeFailed",
+            "incident_class": "bad_config",
+            "instance": "http://frontend.default.svc.cluster.local/cart",
+            "job": "probe/monitoring/herald-frontend-cart",
+            "namespace": "default",
+            "severity": "critical",
+        },
+        "commonAnnotations": {
+            "summary": "frontend /cart probe is failing",
+        },
+        "externalURL": "http://alertmanager",
+        "version": "4",
+        "groupKey": '{}/{namespace="default"}:{alertname="HeraldFrontendCartProbeFailed"}',
         "truncatedAlerts": 0,
     }
 
@@ -246,7 +296,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(result["decision_trace_timeline"][-1]["node_name"], "finalization")
         self.assertEqual(
             commands,
-            [["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=300s"]],
+            [["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"]],
         )
 
     def test_workflow_retries_pre_check_before_skipping_execution(self) -> None:
@@ -297,7 +347,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(trace.final_state, "recovered")
         self.assertEqual(
             commands,
-            [["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=300s"]],
+            [["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"]],
         )
 
     def test_workflow_can_resume_from_saved_first_pass_without_rerunning_planning(self) -> None:
@@ -339,7 +389,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(result["decision_trace_timeline"][0]["node_name"], "fixer")
         self.assertEqual(
             commands,
-            [["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=300s"]],
+            [["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"]],
         )
 
     def test_interactive_hitl_choice_approves_recommended_action(self) -> None:
@@ -379,7 +429,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(trace.final_state, "recovered")
         self.assertEqual(
             commands,
-            [["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=300s"]],
+            [["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"]],
         )
 
     def test_interactive_hitl_choice_rejects_recommended_action(self) -> None:
@@ -487,7 +537,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(trace.final_state, "recovered")
         self.assertEqual(
             commands,
-            [["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=300s"]],
+            [["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"]],
         )
 
     def test_workflow_surfaces_worker_failure_cleanly(self) -> None:
@@ -599,9 +649,56 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(
             commands,
             [
-                ["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=300s"],
+                ["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"],
                 ["kubectl", "get", "deployment", "cartservice", "-n", "default", "-o", "json"],
             ],
+        )
+
+    def test_workflow_can_recover_even_if_rollout_wait_times_out(self) -> None:
+        commands: list[list[str]] = []
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            if command[:3] == ["kubectl", "rollout", "status"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=1,
+                    stdout="",
+                    stderr="timed out waiting for the condition",
+                )
+            raise AssertionError(f"Unexpected command: {command}")
+
+        crashloop_queries = iter([1.0, 0.0])
+        ready_queries = iter([1.0])
+
+        def query_runner(query: str) -> float:
+            if "kube_pod_container_status_waiting_reason" in query:
+                return next(crashloop_queries)
+            if "kube_pod_status_ready" in query:
+                return next(ready_queries)
+            raise AssertionError(f"Unexpected query: {query}")
+
+        result = run_crashloop_recovery_from_payload(
+            _crashloop_payload(),
+            approve_action_id="rollout_undo_cartservice",
+            kubernetes_client=KubernetesClient(runner=runner),
+            prometheus_client=PrometheusClient(
+                query_runner=query_runner,
+                post_check_retry_attempts=1,
+                post_check_retry_sleep_seconds=0.0,
+                sleep_fn=lambda _: None,
+            ),
+            execution_worker_client=_worker_client(),
+        )
+
+        trace = result["decision_trace"]
+        self.assertEqual(trace.execution_result["rollout_status"]["status"], "failed")
+        self.assertEqual(trace.verification_result["post_check"]["status"], "recovered")
+        self.assertEqual(trace.final_state, "recovered")
+        self.assertFalse(trace.rollback_triggered)
+        self.assertEqual(
+            commands,
+            [["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"]],
         )
 
     def test_workflow_marks_rejected_when_human_rejects_action(self) -> None:
@@ -744,9 +841,9 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(
             commands,
             [
-                ["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=300s"],
+                ["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"],
                 ["kubectl", "rollout", "undo", "deployment/cartservice", "-n", "default"],
-                ["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=300s"],
+                ["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"],
             ],
         )
 
@@ -877,6 +974,195 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
             prometheus_client=PrometheusClient(query_runner=query_runner, sleep_fn=lambda _: None),
             execution_worker_client=_worker_client(
                 stdout='stresschaos.chaos-mesh.org "frontend-cpu-saturation" deleted\n',
+            ),
+            input_fn=lambda _: "1",
+        )
+
+        trace = result["decision_trace"]
+        self.assertEqual(trace.human_approval, "approved")
+        self.assertEqual(trace.final_state, "recovered")
+
+    def test_bad_config_workflow_requires_explicit_approval_before_execution(self) -> None:
+        result = run_recovery_from_payload(_bad_config_payload())
+
+        hitl = result["hitl_decision"]
+        trace = result["decision_trace"]
+
+        self.assertTrue(hitl["requires_approval"])
+        self.assertEqual(hitl["routing_decision"], "request_approval_single_action")
+        self.assertEqual(hitl["recommended_action"].action_id, "rollout_undo_frontend_bad_config")
+        self.assertEqual(trace.human_approval, "n/a")
+        self.assertEqual(trace.final_state, "pending_approval")
+        self.assertEqual(set(trace.node_runs_by_node.keys()), {"fixer", "judge", "hitl_gate"})
+
+    def test_bad_config_workflow_executes_approved_rollback_and_marks_recovered(self) -> None:
+        probe_queries = iter([0.0, 1.0])
+        commands: list[list[str]] = []
+
+        def query_runner(query: str) -> float:
+            if "probe_success" in query:
+                return next(probe_queries)
+            if "kube_pod_status_ready" in query:
+                return 1.0
+            raise AssertionError(f"Unexpected query: {query}")
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout="ok",
+                stderr="",
+            )
+
+        result = run_recovery_from_payload(
+            _bad_config_payload(),
+            approve_action_id="rollout_undo_frontend_bad_config",
+            prometheus_client=PrometheusClient(query_runner=query_runner),
+            kubernetes_client=KubernetesClient(runner=runner),
+            execution_worker_client=_worker_client(
+                stdout="deployment.apps/frontend rolled back\n",
+            ),
+        )
+
+        trace = result["decision_trace"]
+
+        self.assertEqual(trace.human_approval, "approved")
+        self.assertEqual(trace.execution_result["status"], "succeeded")
+        self.assertEqual(trace.execution_result["action_type"], "rollout_undo_deployment")
+        self.assertEqual(trace.execution_result["deployment"], "frontend")
+        self.assertEqual(trace.execution_result["rollout_status"]["status"], "succeeded")
+        self.assertEqual(trace.verification_result["pre_check"]["status"], "ready_to_execute")
+        self.assertEqual(trace.verification_result["post_check"]["status"], "recovered")
+        self.assertEqual(trace.final_state, "recovered")
+        self.assertIn("execution_worker", trace.node_runs_by_node)
+        self.assertIn("rollout_wait", trace.node_runs_by_node)
+        self.assertEqual(
+            commands,
+            [["kubectl", "rollout", "status", "deployment/frontend", "-n", "default", "--timeout=60s"]],
+        )
+
+    def test_bad_config_workflow_skips_execution_when_probe_telemetry_is_missing(self) -> None:
+        commands: list[list[str]] = []
+
+        def query_runner(query: str) -> float | None:
+            if "probe_success" in query:
+                return None
+            if "kube_pod_status_ready" in query:
+                return 1.0
+            raise AssertionError(f"Unexpected query: {query}")
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout="ok",
+                stderr="",
+            )
+
+        result = run_recovery_from_payload(
+            _bad_config_payload(),
+            approve_action_id="rollout_undo_frontend_bad_config",
+            prometheus_client=PrometheusClient(query_runner=query_runner),
+            kubernetes_client=KubernetesClient(runner=runner),
+            execution_worker_client=_worker_client(
+                stdout="deployment.apps/frontend rolled back\n",
+            ),
+        )
+
+        trace = result["decision_trace"]
+
+        self.assertEqual(trace.verification_result["pre_check"]["status"], "unknown")
+        self.assertFalse(trace.verification_result["pre_check"]["should_execute"])
+        self.assertEqual(trace.execution_result["status"], "skipped")
+        self.assertEqual(trace.final_state, "escalated")
+        self.assertEqual(commands, [])
+
+    def test_bad_config_workflow_marks_rejected_when_human_rejects_action(self) -> None:
+        result = run_recovery_from_payload(
+            _bad_config_payload(),
+            reject_action_id="rollout_undo_frontend_bad_config",
+        )
+
+        trace = result["decision_trace"]
+
+        self.assertEqual(trace.human_approval, "rejected")
+        self.assertEqual(trace.execution_result["status"], "not_executed")
+        self.assertEqual(trace.final_state, "rejected")
+
+    def test_bad_config_workflow_can_resume_from_saved_first_pass(self) -> None:
+        planning_result = run_recovery_from_payload(_bad_config_payload())
+
+        probe_queries = iter([0.0, 1.0])
+
+        def query_runner(query: str) -> float:
+            if "probe_success" in query:
+                return next(probe_queries)
+            if "kube_pod_status_ready" in query:
+                return 1.0
+            raise AssertionError(f"Unexpected query: {query}")
+
+        result = run_recovery_from_saved_plan(
+            _bad_config_payload(),
+            planning_result,
+            approve_action_id="rollout_undo_frontend_bad_config",
+            prometheus_client=PrometheusClient(query_runner=query_runner),
+            execution_worker_client=_worker_client(
+                stdout="deployment.apps/frontend rolled back\n",
+            ),
+        )
+
+        trace = result["decision_trace"]
+        self.assertEqual(trace.final_state, "recovered")
+        self.assertEqual(trace.node_runs_by_node["fixer"]["fixer:0001"]["attempt"], 1)
+        self.assertEqual(trace.node_runs_by_node["judge"]["judge:0002"]["attempt"], 1)
+
+    def test_bad_config_workflow_surfaces_worker_failure_cleanly(self) -> None:
+        result = run_recovery_from_payload(
+            _bad_config_payload(),
+            approve_action_id="rollout_undo_frontend_bad_config",
+            prometheus_client=PrometheusClient(query_runner=lambda _: 0.0, sleep_fn=lambda _: None),
+            execution_worker_client=_worker_client(
+                status="failed",
+                returncode=1,
+                stdout="",
+                stderr="worker failed",
+            ),
+        )
+
+        trace = result["decision_trace"]
+
+        self.assertEqual(trace.execution_result["status"], "failed")
+        self.assertEqual(trace.verification_result["post_check"]["status"], "not_run")
+        self.assertEqual(trace.final_state, "escalated")
+
+    def test_bad_config_workflow_interactive_hitl_approves_recommended_action(self) -> None:
+        planning_result = run_recovery_from_payload(_bad_config_payload())
+
+        probe_queries = iter([0.0, 1.0])
+
+        def query_runner(query: str) -> float:
+            if "probe_success" in query:
+                return next(probe_queries)
+            if "kube_pod_status_ready" in query:
+                return 1.0
+            raise AssertionError(f"Unexpected query: {query}")
+
+        result = _continue_with_interactive_hitl(
+            payload=_bad_config_payload(),
+            planning_result=planning_result,
+            prometheus_client=PrometheusClient(query_runner=query_runner),
+            kubernetes_client=KubernetesClient(
+                runner=lambda command: subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout="ok",
+                    stderr="",
+                )
+            ),
+            execution_worker_client=_worker_client(
+                stdout="deployment.apps/frontend rolled back\n",
             ),
             input_fn=lambda _: "1",
         )

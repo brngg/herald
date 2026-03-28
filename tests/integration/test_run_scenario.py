@@ -15,6 +15,9 @@ class RunScenarioIntegrationTest(unittest.TestCase):
             repo_root / "evaluation" / "scenarios" / "crashloop_recovered.json",
             repo_root / "evaluation" / "scenarios" / "crashloop_worker_failure.json",
             repo_root / "evaluation" / "scenarios" / "frontend_cpu_recovered.json",
+            repo_root / "evaluation" / "scenarios" / "frontend_bad_config_recovered.json",
+            repo_root / "evaluation" / "scenarios" / "frontend_bad_config_rejected.json",
+            repo_root / "evaluation" / "scenarios" / "frontend_bad_config_worker_failure.json",
         ]
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -25,10 +28,13 @@ class RunScenarioIntegrationTest(unittest.TestCase):
             )
 
             self.assertEqual(summary["runs_per_scenario"], 1)
-            self.assertEqual(summary["metrics"]["total_runs"], 3)
+            self.assertEqual(summary["metrics"]["total_runs"], 6)
             self.assertTrue((Path(temp_dir) / "crashloop_recovered-run-01.json").exists())
             self.assertTrue((Path(temp_dir) / "crashloop_worker_failure-run-01.json").exists())
             self.assertTrue((Path(temp_dir) / "frontend_cpu_recovered-run-01.json").exists())
+            self.assertTrue((Path(temp_dir) / "frontend_bad_config_recovered-run-01.json").exists())
+            self.assertTrue((Path(temp_dir) / "frontend_bad_config_rejected-run-01.json").exists())
+            self.assertTrue((Path(temp_dir) / "frontend_bad_config_worker_failure-run-01.json").exists())
             self.assertTrue((Path(temp_dir) / "metrics-summary.json").exists())
             self.assertTrue((Path(temp_dir) / "metrics-summary.md").exists())
             with (Path(temp_dir) / "crashloop_recovered-run-01.json").open("r", encoding="utf-8") as handle:

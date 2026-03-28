@@ -1,0 +1,30 @@
+{
+  "scenario_id": "frontend_bad_config_worker_failure",
+  "payload_file": "payloads/frontend_bad_config_alert.json",
+  "approve_action_id": "rollout_undo_frontend_bad_config",
+  "prometheus": {
+    "probe_values": [0.0],
+    "ready_values": [1.0],
+    "pre_check_retry_attempts": 1,
+    "post_check_retry_attempts": 1
+  },
+  "worker_result": {
+    "status": "failed",
+    "returncode": 1,
+    "stdout": "",
+    "stderr": "worker failed",
+    "summary": "Agent failed to complete the approved remediation."
+  },
+  "kubernetes": {
+    "rollout_status": {
+      "returncode": 0,
+      "stdout": "deployment \"frontend\" successfully rolled out\n",
+      "stderr": ""
+    }
+  },
+  "expected": {
+    "top_action_id": "rollout_undo_frontend_bad_config",
+    "requires_approval": true,
+    "final_state": "escalated"
+  }
+}

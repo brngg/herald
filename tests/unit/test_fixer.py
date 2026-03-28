@@ -64,6 +64,27 @@ def _cpu_incident() -> Incident:
     )
 
 
+def _bad_config_incident() -> Incident:
+    return Incident(
+        incident_id="badcfg123",
+        incident_class="bad_config",
+        detected_at=datetime.now(tz=timezone.utc),
+        source="prometheus",
+        raw_context={
+            "alert": {
+                "labels": {
+                    "alertname": "HeraldFrontendCartProbeFailed",
+                    "incident_class": "bad_config",
+                    "namespace": "default",
+                    "pod": "frontend-6f7f7b6c8f-aaaaa",
+                    "severity": "critical",
+                },
+                "annotations": {"summary": "frontend /cart probe is failing"},
+            }
+        },
+    )
+
+
 class FixerTest(unittest.TestCase):
     def test_crashloop_proposes_actions_for_incident_class_crashloop(self) -> None:
         state = initial_fixer_state(_crashloop_incident())
@@ -95,7 +116,23 @@ class FixerTest(unittest.TestCase):
 
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["incident"].incident_class, "bad_config")
-        self.assertIn("unsupported incident_class", results[0]["raw_plan"])
+        self.assertEqual(results[0]["actions"][0].action_type, "rollout_undo_deployment")
+        self.assertEqual(results[0]["actions"][0].parameters["deployment"], "frontend")
+        self.assertEqual(results[0]["actions"][1].action_type, "escalate")
+
+    def test_bad_config_proposes_frontend_rollback_actions(self) -> None:
+        state = initial_fixer_state(_bad_config_incident())
+        state.update(extract_evidence_node(state))
+        state.update(build_incident_summary_node(state))
+        state.update(propose_actions_node(state))
+        state.update(finalize_plan_node(state))
+
+        self.assertEqual(len(state["actions"]), 2)
+        self.assertEqual(state["actions"][0].action_id, "rollout_undo_frontend_bad_config")
+        self.assertEqual(state["actions"][0].action_type, "rollout_undo_deployment")
+        self.assertEqual(state["actions"][0].parameters["deployment"], "frontend")
+        self.assertEqual(state["actions"][1].action_type, "escalate")
+        self.assertIn("rollout_undo_frontend_bad_config", state["raw_plan"])
 
     def test_run_fixer_pipeline_uses_injected_llm(self) -> None:
         class StubLLM:

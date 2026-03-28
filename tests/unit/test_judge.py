@@ -169,7 +169,7 @@ class JudgeTest(unittest.TestCase):
         self.assertEqual(state["judge_verdict"], "fail")
         self.assertIn("Blast Radius", state["judge_reason"])
 
-    def test_judge_fails_unsupported_incident_class(self) -> None:
+    def test_judge_passes_supported_bad_config_plan(self) -> None:
         state = run_judge_pipeline(
             incident=Incident(
                 incident_id="judge-bad-config",
@@ -182,19 +182,55 @@ class JudgeTest(unittest.TestCase):
             incident_summary="[critical] bad_config",
             actions=[
                 RemediationAction(
-                    action_id="escalate-frontend",
+                    action_id="rollout_undo_frontend_bad_config",
+                    action_type="rollout_undo_deployment",
+                    description="Roll back frontend Deployment to the previous ReplicaSet.",
+                    confidence_score=0.92,
+                    blast_radius_score=0.3,
+                    requires_approval=True,
+                    parameters={"namespace": "default", "deployment": "frontend"},
+                ),
+                RemediationAction(
+                    action_id="escalate_frontend_bad_config",
                     action_type="escalate",
-                    description="Escalate frontend bad-config incident.",
-                    confidence_score=0.4,
+                    description="Escalate frontend bad-config incident for deeper investigation.",
+                    confidence_score=0.2,
                     blast_radius_score=0.0,
                     requires_approval=True,
-                    parameters={"reason": "Judge v0 does not support bad_config yet."},
+                    parameters={"reason": "Bounded frontend config remediation did not appear safe or sufficient."},
+                ),
+            ],
+        )
+
+        self.assertEqual(state["judge_verdict"], "pass")
+        self.assertIn("Bad-config plan is bounded", state["judge_reason"])
+
+    def test_judge_fails_bad_config_plan_targeting_other_deployment(self) -> None:
+        state = run_judge_pipeline(
+            incident=Incident(
+                incident_id="judge-bad-config",
+                incident_class="bad_config",
+                detected_at=datetime.now(tz=timezone.utc),
+                source="prometheus",
+                raw_context={},
+            ),
+            evidence=_bad_config_evidence(),
+            incident_summary="[critical] bad_config",
+            actions=[
+                RemediationAction(
+                    action_id="rollout_undo_cartservice_bad_config",
+                    action_type="rollout_undo_deployment",
+                    description="Wrongly target cartservice.",
+                    confidence_score=0.9,
+                    blast_radius_score=0.3,
+                    requires_approval=True,
+                    parameters={"namespace": "default", "deployment": "cartservice"},
                 )
             ],
         )
 
         self.assertEqual(state["judge_verdict"], "fail")
-        self.assertIn("only supports crashloop and cpu_saturation", state["judge_reason"])
+        self.assertIn("frontend", state["judge_reason"])
 
     def test_judge_passes_supported_cpu_plan(self) -> None:
         state = run_judge_pipeline(

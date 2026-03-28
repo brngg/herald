@@ -12,6 +12,6 @@ spec:
       app: frontend
   stressors:
     cpu:
-      workers: 1
-      load: 95
-  duration: "10m"
+      workers: 4
+      load: 100
+  duration: "20m"

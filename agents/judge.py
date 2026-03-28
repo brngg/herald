@@ -68,6 +68,7 @@ def _infer_target_deployment(evidence: dict[str, Any]) -> str | None:
 
     return None
 
+
 def evaluate_plan_node(state: JudgeAgentState) -> dict[str, Any]:
     """Heuristic Judge for the current supported vertical slices."""
 
@@ -85,10 +86,10 @@ def evaluate_plan_node(state: JudgeAgentState) -> dict[str, Any]:
             "judge_reason": "Fixer proposed no remediation actions to evaluate.",
         }
 
-    if incident_class not in {"crashloop", "cpu_saturation"}:
+    if incident_class not in {"crashloop", "cpu_saturation", "bad_config"}:
         return {
             "judge_verdict": "fail",
-            "judge_reason": f"Judge v0 only supports crashloop and cpu_saturation plans, not {incident_class!r}.",
+            "judge_reason": f"Judge v0 only supports crashloop, cpu_saturation, and bad_config plans, not {incident_class!r}.",
         }
 
     if incident_class == "crashloop":
@@ -146,59 +147,115 @@ def evaluate_plan_node(state: JudgeAgentState) -> dict[str, Any]:
             ),
         }
 
-    allowed_action_types = {
-        "delete_stresschaos",
-        "escalate",
-        "do_nothing",
-    }
-    expected_name = "frontend-cpu-saturation"
-    incident_namespace = evidence.get("namespace") or "default"
+    if incident_class == "cpu_saturation":
+        allowed_action_types = {
+            "delete_stresschaos",
+            "escalate",
+            "do_nothing",
+        }
+        expected_name = "frontend-cpu-saturation"
+        incident_namespace = evidence.get("namespace") or "default"
 
-    for action in actions:
-        if action.action_type not in allowed_action_types:
-            return {
-                "judge_verdict": "fail",
-                "judge_reason": (
-                    f"Action {action.action_id!r} has unsupported action_type "
-                    f"{action.action_type!r} for cpu_saturation Judge v0."
-                ),
-            }
-        if not action.requires_approval:
-            return {
-                "judge_verdict": "fail",
-                "judge_reason": (
-                    f"Action {action.action_id!r} is missing requires_approval=true, "
-                    "which violates the HITL Gate policy."
-                ),
-            }
-        if action.blast_radius_score >= 0.8 and action.action_type not in {"escalate", "do_nothing"}:
-            return {
-                "judge_verdict": "fail",
-                "judge_reason": (
-                    f"Action {action.action_id!r} exceeds the blocked Blast Radius threshold."
-                ),
-            }
-        if action.action_type == "delete_stresschaos":
-            action_namespace = action.parameters.get("namespace")
-            action_name = action.parameters.get("name")
-            if action_namespace != incident_namespace or action_name != expected_name:
+        for action in actions:
+            if action.action_type not in allowed_action_types:
                 return {
                     "judge_verdict": "fail",
                     "judge_reason": (
-                        f"Action {action.action_id!r} targets StressChaos "
-                        f"{action_name!r} in namespace {action_namespace!r}, "
-                        f"but the incident points to {expected_name!r} in "
-                        f"namespace {incident_namespace!r}."
+                        f"Action {action.action_id!r} has unsupported action_type "
+                        f"{action.action_type!r} for cpu_saturation Judge v0."
                     ),
                 }
+            if not action.requires_approval:
+                return {
+                    "judge_verdict": "fail",
+                    "judge_reason": (
+                        f"Action {action.action_id!r} is missing requires_approval=true, "
+                        "which violates the HITL Gate policy."
+                    ),
+                }
+            if action.blast_radius_score >= 0.8 and action.action_type not in {"escalate", "do_nothing"}:
+                return {
+                    "judge_verdict": "fail",
+                    "judge_reason": (
+                        f"Action {action.action_id!r} exceeds the blocked Blast Radius threshold."
+                    ),
+                }
+            if action.action_type == "delete_stresschaos":
+                action_namespace = action.parameters.get("namespace")
+                action_name = action.parameters.get("name")
+                if action_namespace != incident_namespace or action_name != expected_name:
+                    return {
+                        "judge_verdict": "fail",
+                        "judge_reason": (
+                            f"Action {action.action_id!r} targets StressChaos "
+                            f"{action_name!r} in namespace {action_namespace!r}, "
+                            f"but the incident points to {expected_name!r} in "
+                            f"namespace {incident_namespace!r}."
+                        ),
+                    }
 
-    return {
-        "judge_verdict": "pass",
-        "judge_reason": (
-            "CPU saturation plan is bounded, approval-gated, and limited to the supported "
-            "v0 Chaos Mesh remediation action."
-        ),
-    }
+        return {
+            "judge_verdict": "pass",
+            "judge_reason": (
+                "CPU saturation plan is bounded, approval-gated, and limited to the supported "
+                "v0 Chaos Mesh remediation action."
+            ),
+        }
+
+    if incident_class == "bad_config":
+        allowed_action_types = {
+            "rollout_undo_deployment",
+            "escalate",
+            "do_nothing",
+        }
+        expected_name = "frontend"
+        incident_namespace = evidence.get("namespace") or "default"
+
+        for action in actions:
+            if action.action_type not in allowed_action_types:
+                return {
+                    "judge_verdict": "fail",
+                    "judge_reason": (
+                        f"Action {action.action_id!r} has unsupported action_type "
+                        f"{action.action_type!r} for bad_config Judge v0."
+                    ),
+                }
+            if not action.requires_approval:
+                return {
+                    "judge_verdict": "fail",
+                    "judge_reason": (
+                        f"Action {action.action_id!r} is missing requires_approval=true, "
+                        "which violates the HITL Gate policy."
+                    ),
+                }
+            if action.blast_radius_score >= 0.8 and action.action_type not in {"escalate", "do_nothing"}:
+                return {
+                    "judge_verdict": "fail",
+                    "judge_reason": (
+                        f"Action {action.action_id!r} exceeds the blocked Blast Radius threshold."
+                    ),
+                }
+            if action.action_type == "rollout_undo_deployment":
+                action_namespace = action.parameters.get("namespace")
+                action_deployment = action.parameters.get("deployment")
+                if action_namespace != incident_namespace or action_deployment != expected_name:
+                    return {
+                        "judge_verdict": "fail",
+                        "judge_reason": (
+                            f"Action {action.action_id!r} targets deployment "
+                            f"{action_deployment!r} in namespace {action_namespace!r}, "
+                            f"but the incident points to {expected_name!r} in "
+                            f"namespace {incident_namespace!r}."
+                        ),
+                    }
+
+        return {
+            "judge_verdict": "pass",
+            "judge_reason": (
+                "Bad-config plan is bounded, reversible, approval-gated, and limited to "
+                "supported v0 rollout undo remediation actions."
+            ),
+        }
 
 
 def finalize_judge_node(state: JudgeAgentState) -> dict[str, Any]:

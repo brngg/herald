@@ -188,6 +188,35 @@ def propose_actions_node(state: FixerAgentState) -> dict[str, Any]:
                 parameters={"reason": "Bounded CPU remediation did not appear safe or sufficient."},
             )
         )
+    elif incident_class == "bad_config":
+        labels = evidence.get("labels")
+        deployment = None
+        if isinstance(labels, dict):
+            deployment = _infer_deployment_from_labels(labels)
+        deployment = deployment or "frontend"
+
+        actions.append(
+            RemediationAction(
+                action_id="rollout_undo_frontend_bad_config",
+                action_type="rollout_undo_deployment",
+                description=f"Roll back {deployment} Deployment to the previous ReplicaSet.",
+                confidence_score=0.92,
+                blast_radius_score=0.3,
+                requires_approval=True,
+                parameters={"namespace": namespace, "deployment": deployment},
+            )
+        )
+        actions.append(
+            RemediationAction(
+                action_id="escalate_frontend_bad_config",
+                action_type="escalate",
+                description=f"Escalate {deployment} bad-config incident for deeper investigation.",
+                confidence_score=0.2,
+                blast_radius_score=0.0,
+                requires_approval=True,
+                parameters={"reason": "Bounded frontend config remediation did not appear safe or sufficient."},
+            )
+        )
     else:
         errors.append(
             "unsupported incident_class for v0 Fixer: "

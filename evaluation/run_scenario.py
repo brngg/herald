@@ -90,9 +90,11 @@ def _build_prometheus_client(scenario: dict[str, Any]) -> PrometheusClient:
     crashloop_values = list(prometheus_config.get("crashloop_values", []))
     ready_values = list(prometheus_config.get("ready_values", []))
     cpu_values = list(prometheus_config.get("cpu_values", []))
+    probe_values = list(prometheus_config.get("probe_values", []))
     default_crashloop = float(prometheus_config.get("default_crashloop", 0.0))
     default_ready = float(prometheus_config.get("default_ready", 0.0))
     default_cpu = float(prometheus_config.get("default_cpu", 0.0))
+    default_probe = float(prometheus_config.get("default_probe", 0.0))
 
     def query_runner(query: str) -> float:
         if "kube_pod_container_status_waiting_reason" in query:
@@ -107,6 +109,10 @@ def _build_prometheus_client(scenario: dict[str, Any]) -> PrometheusClient:
             if ready_values:
                 return float(ready_values.pop(0))
             return default_ready
+        if "probe_success" in query:
+            if probe_values:
+                return float(probe_values.pop(0))
+            return default_probe
         raise AssertionError(f"Unexpected query: {query}")
 
     return PrometheusClient(
@@ -162,10 +168,19 @@ def _build_kubernetes_client(scenario: dict[str, Any]) -> KubernetesClient:
                 stderr=str(stresschaos_status["stderr"]),
             )
         if command[:3] == ["kubectl", "rollout", "undo"]:
+            deployment = command[3].split("/", 1)[1] if len(command) > 3 and "/" in command[3] else "cartservice"
             return subprocess.CompletedProcess(
                 args=list(command),
                 returncode=0,
-                stdout="deployment.apps/cartservice rolled back\n",
+                stdout=f"deployment.apps/{deployment} rolled back\n",
+                stderr="",
+            )
+        if command[:3] == ["kubectl", "rollout", "restart"]:
+            deployment = command[3].split("/", 1)[1] if len(command) > 3 and "/" in command[3] else "cartservice"
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout=f"deployment.apps/{deployment} restarted\n",
                 stderr="",
             )
         if command[:3] == ["kubectl", "delete", "stresschaos"]:
@@ -199,9 +214,11 @@ import json
 import sys
 
 dispatch = json.load(sys.stdin)
-command = ["kubectl", "rollout", "undo", "deployment/cartservice", "-n", "default"]
+deployment = dispatch["parameters"].get("deployment", "cartservice")
+namespace = dispatch["parameters"].get("namespace", "default")
+command = ["kubectl", "rollout", "undo", f"deployment/{{deployment}}", "-n", namespace]
 if dispatch["action_type"] == "rollout_restart_deployment":
-    command = ["kubectl", "rollout", "restart", "deployment/cartservice", "-n", "default"]
+    command = ["kubectl", "rollout", "restart", f"deployment/{{deployment}}", "-n", namespace]
 if dispatch["action_type"] == "delete_stresschaos":
     command = ["kubectl", "delete", "stresschaos", dispatch["parameters"]["name"], "-n", dispatch["parameters"]["namespace"]]
 result = {{

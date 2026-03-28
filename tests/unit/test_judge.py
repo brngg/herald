@@ -61,6 +61,45 @@ def _bad_config_evidence() -> dict[str, object]:
     }
 
 
+def _cpu_incident() -> Incident:
+    return Incident(
+        incident_id="judge-cpu123",
+        incident_class="cpu_saturation",
+        detected_at=datetime.now(tz=timezone.utc),
+        source="prometheus",
+        raw_context={
+            "alert": {
+                "labels": {
+                    "alertname": "HeraldFrontendHighCPU",
+                    "incident_class": "cpu_saturation",
+                    "namespace": "default",
+                    "pod": "frontend-6f7f7b6c8f-aaaaa",
+                    "severity": "warning",
+                },
+                "annotations": {
+                    "summary": "frontend pod is experiencing high CPU",
+                },
+            }
+        },
+    )
+
+
+def _cpu_evidence() -> dict[str, object]:
+    return {
+        "incident_class": "cpu_saturation",
+        "incident_class_normalized": "cpu_saturation",
+        "alertname": "HeraldFrontendHighCPU",
+        "namespace": "default",
+        "severity": "warning",
+        "summary": "frontend pod is experiencing high CPU",
+        "pod": "frontend-6f7f7b6c8f-aaaaa",
+        "labels": {
+            "app": "frontend",
+            "namespace": "default",
+        },
+    }
+
+
 def _crashloop_actions() -> list[RemediationAction]:
     return [
         RemediationAction(
@@ -155,7 +194,49 @@ class JudgeTest(unittest.TestCase):
         )
 
         self.assertEqual(state["judge_verdict"], "fail")
-        self.assertIn("only supports crashloop", state["judge_reason"])
+        self.assertIn("only supports crashloop and cpu_saturation", state["judge_reason"])
+
+    def test_judge_passes_supported_cpu_plan(self) -> None:
+        state = run_judge_pipeline(
+            incident=_cpu_incident(),
+            evidence=_cpu_evidence(),
+            incident_summary="[warning] cpu saturation",
+            actions=[
+                RemediationAction(
+                    action_id="delete_frontend_cpu_stresschaos",
+                    action_type="delete_stresschaos",
+                    description="Delete the active frontend CPU StressChaos object.",
+                    confidence_score=0.9,
+                    blast_radius_score=0.2,
+                    requires_approval=True,
+                    parameters={"namespace": "default", "name": "frontend-cpu-saturation"},
+                )
+            ],
+        )
+
+        self.assertEqual(state["judge_verdict"], "pass")
+        self.assertIn("CPU saturation plan is bounded", state["judge_reason"])
+
+    def test_judge_fails_cpu_plan_targeting_other_stresschaos(self) -> None:
+        state = run_judge_pipeline(
+            incident=_cpu_incident(),
+            evidence=_cpu_evidence(),
+            incident_summary="[warning] cpu saturation",
+            actions=[
+                RemediationAction(
+                    action_id="delete_other_stresschaos",
+                    action_type="delete_stresschaos",
+                    description="Delete some other StressChaos object.",
+                    confidence_score=0.7,
+                    blast_radius_score=0.2,
+                    requires_approval=True,
+                    parameters={"namespace": "default", "name": "other-chaos"},
+                )
+            ],
+        )
+
+        self.assertEqual(state["judge_verdict"], "fail")
+        self.assertIn("frontend-cpu-saturation", state["judge_reason"])
 
     def test_judge_fails_unsupported_action_type_for_crashloop(self) -> None:
         state = run_judge_pipeline(

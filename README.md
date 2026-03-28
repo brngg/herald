@@ -35,6 +35,14 @@ HERALD is built around three principles:
 - **Auditability**: every plan, verdict, approval, and outcome is recorded
 - **Verified recovery**: every remediation should follow pre-check, execute, and post-check
 
+The current control plane now has two human gates:
+
+- **Gate 0 investigation approval**: Alertmanager intake stores pending alerts in a
+  filesystem inbox under `artifacts/inbox/`, and an operator explicitly chooses whether
+  HERALD should investigate or ignore each alert.
+- **Execution approval**: after Gate 0 investigation starts, HERALD still runs Fixer ->
+  Judge -> HITL Gate and requires a second explicit human approval before any action executes.
+
 ---
 
 ## Design Evolution
@@ -163,14 +171,14 @@ Current implementation is strongest in:
 - bounded crashloop execution through typed Kubernetes tools inside the execution agent
 - pre-check and post-check verification for the `crashloop` slice, including Kubernetes-aware fallback when Prometheus readiness lags after rollout
 - a live-validated crashloop recovery workflow entrypoint
+- a full CPU saturation recovery slice for `frontend`, including Chaos Mesh deletion, approval-gated execution, and verification
+- replay artifacts and metrics for crashloop and CPU saturation scenarios
 
 Still not implemented end to end:
 
-- rollback behavior after failed post-check
 - durable workflow orchestration
 - Slack-based approval flow
-- evaluation harness
-- the other three incident classes
+- the remaining two incident classes
 
 Progress by phase:
 
@@ -200,6 +208,80 @@ Run unit tests:
 ```bash
 python -m unittest discover -s tests/unit -p 'test_*.py'
 ```
+
+---
+
+## Gate 0 Alert Inbox
+
+HERALD now accepts Alertmanager webhooks into a filesystem-backed inbox before Fixer or
+Judge run. Each incident is stored under `artifacts/inbox/<artifact-id>/` with:
+
+- `alert.json`: raw webhook payload, normalized incident metadata, arrival timestamp, and Gate 0 status
+- `first-pass.json`: saved planning result after Gate 0 investigation starts
+- `final-result.json`: saved final workflow result after the second approval gate completes
+
+The v1 inbox statuses are:
+
+- `pending_investigation`
+- `ignored`
+- `planning_started`
+- `pending_execution_approval`
+- `completed`
+
+### Run the Alert Intake Service
+
+Start the local webhook receiver:
+
+```bash
+./.venv/bin/uvicorn services.alert_inbox_service:app --host 0.0.0.0 --port 8080
+```
+
+Send an Alertmanager payload to it:
+
+```bash
+curl -X POST http://localhost:8080/alerts \
+  -H 'content-type: application/json' \
+  --data-binary @payloads/crashloop_alert.json
+```
+
+That writes one pending inbox artifact per incident under `artifacts/inbox/`.
+
+### Run the Persistent Terminal Watcher
+
+For the live Gate 0 operator flow, keep a terminal watcher open:
+
+```bash
+./.venv/bin/python -m workflows.operator_inbox \
+  --watch \
+  --prometheus-base-url http://localhost:9090
+```
+
+The watcher will:
+
+- poll the filesystem inbox for new alerts
+- automatically surface `pending_investigation` incidents in terminal
+- prioritize `pending_execution_approval` incidents if planning already happened
+- prompt `1 = investigate` or `2 = ignore`
+- if investigated, run planning and then prompt `1 = approve execution` or `2 = reject`
+
+### Run the One-Shot Terminal Inbox Flow
+
+For debugging or manual selection, you can still open the operator inbox directly:
+
+```bash
+./.venv/bin/python -m workflows.operator_inbox --prometheus-base-url http://localhost:9090
+```
+
+The one-shot flow will:
+
+- list actionable inbox alerts
+- prompt `1 = investigate` or `2 = ignore`
+- if ignored, mark the inbox artifact `ignored` and exit
+- if investigated, mark the alert `planning_started`, run the existing recovery planning flow, save `first-pass.json`, and move to `pending_execution_approval`
+- continue into the existing second approval gate and prompt `1 = approve execution` or `2 = reject`
+
+Gate 0 investigation approval does not authorize execution by itself. The second execution
+approval gate remains required exactly as before.
 
 ---
 
@@ -325,6 +407,31 @@ That helper:
 - if approved, saves the live worker stream to `artifacts/crashloop/<timestamp>/worker-stream.log`
 - if rejected, saves the rejection JSON to `artifacts/crashloop/<timestamp>/rejection-run.json`
 
+### Frontend CPU Demo
+
+The repo now also includes a full demo helper for the `cpu_saturation` slice on
+`frontend`. It applies the Chaos Mesh CPU stress scenario, waits for the Prometheus
+signal to turn positive, runs the first HERALD pass, and then resumes approval or
+rejection from the saved first-pass artifact.
+
+If your local stack and Prometheus port-forward are already running, use:
+
+```bash
+./scripts/run_frontend_cpu_demo.sh
+```
+
+That helper:
+
+- applies the frontend CPU saturation scenario
+- saves the first-pass JSON to `artifacts/frontend_cpu/<timestamp>/first-pass.json`
+- prompts you to approve, reject, or stop
+- resumes from the saved first-pass artifact instead of rerunning Fixer and Judge
+- if approved, deletes the active `frontend-cpu-saturation` `StressChaos` object
+- saves the final JSON and worker stream under `artifacts/frontend_cpu/<timestamp>/`
+
+The bounded remediation for this slice is intentionally honest: HERALD removes the
+active CPU chaos object and then verifies that CPU pressure and readiness recover.
+
 ### Live Execution View
 
 When you run the approval command, HERALD now streams the spawned execution worker lifecycle
@@ -412,6 +519,16 @@ What to look for:
 - `decision_trace.verification_result.pre_check`
 - `decision_trace.verification_result.post_check`
 - `decision_trace.final_state` should end as `recovered`, `rolled_back`, or `escalated`
+
+If you use the new Gate 0 inbox flow instead of calling the recovery workflow directly,
+the operator sequence is:
+
+1. Alertmanager sends the webhook to `/alerts`.
+2. HERALD stores a `pending_investigation` inbox artifact.
+3. The operator keeps `python -m workflows.operator_inbox --watch` running in terminal.
+4. The watcher prompts `1 = investigate` or `2 = ignore`.
+5. If investigated, HERALD saves `first-pass.json` and then prompts for the existing
+   execution approval gate.
 
 ### Step 2b: Run With Explicit Rejection
 
@@ -538,6 +655,7 @@ Run one success path plus one failure path:
 ./.venv/bin/python -m evaluation.run_scenario \
   --scenario evaluation/scenarios/crashloop_recovered.json \
   --scenario evaluation/scenarios/crashloop_worker_failure.json \
+  --scenario evaluation/scenarios/frontend_cpu_recovered.json \
   --runs 1 \
   --output-dir /tmp/herald-eval
 ```

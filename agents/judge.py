@@ -69,7 +69,7 @@ def _infer_target_deployment(evidence: dict[str, Any]) -> str | None:
     return None
 
 def evaluate_plan_node(state: JudgeAgentState) -> dict[str, Any]:
-    """Heuristic Judge for the current crashloop vertical slice."""
+    """Heuristic Judge for the current supported vertical slices."""
 
     actions = state.get("actions", [])
     evidence = state.get("evidence", {})
@@ -85,18 +85,74 @@ def evaluate_plan_node(state: JudgeAgentState) -> dict[str, Any]:
             "judge_reason": "Fixer proposed no remediation actions to evaluate.",
         }
 
-    if incident_class != "crashloop":
+    if incident_class not in {"crashloop", "cpu_saturation"}:
         return {
             "judge_verdict": "fail",
-            "judge_reason": f"Judge v0 only supports crashloop plans, not {incident_class!r}.",
+            "judge_reason": f"Judge v0 only supports crashloop and cpu_saturation plans, not {incident_class!r}.",
+        }
+
+    if incident_class == "crashloop":
+        allowed_action_types = {
+            "rollout_undo_deployment",
+            "rollout_restart_deployment",
+            "escalate",
+            "do_nothing",
+        }
+
+        for action in actions:
+            if action.action_type not in allowed_action_types:
+                return {
+                    "judge_verdict": "fail",
+                    "judge_reason": (
+                        f"Action {action.action_id!r} has unsupported action_type "
+                        f"{action.action_type!r} for crashloop Judge v0."
+                    ),
+                }
+            if not action.requires_approval:
+                return {
+                    "judge_verdict": "fail",
+                    "judge_reason": (
+                        f"Action {action.action_id!r} is missing requires_approval=true, "
+                        "which violates the HITL Gate policy."
+                    ),
+                }
+            if action.blast_radius_score >= 0.8 and action.action_type not in {"escalate", "do_nothing"}:
+                return {
+                    "judge_verdict": "fail",
+                    "judge_reason": (
+                        f"Action {action.action_id!r} exceeds the blocked Blast Radius threshold."
+                    ),
+                }
+            if action.action_type in {"rollout_undo_deployment", "rollout_restart_deployment"}:
+                action_namespace = action.parameters.get("namespace")
+                action_deployment = action.parameters.get("deployment")
+                incident_namespace = evidence.get("namespace") or "default"
+                if action_namespace != incident_namespace or action_deployment != target_deployment:
+                    return {
+                        "judge_verdict": "fail",
+                        "judge_reason": (
+                            f"Action {action.action_id!r} targets deployment "
+                            f"{action_deployment!r} in namespace {action_namespace!r}, "
+                            f"but the incident points to {target_deployment!r} in "
+                            f"namespace {incident_namespace!r}."
+                        ),
+                    }
+
+        return {
+            "judge_verdict": "pass",
+            "judge_reason": (
+                "Crashloop plan is bounded, reversible, approval-gated, and limited to "
+                "supported v0 remediation actions."
+            ),
         }
 
     allowed_action_types = {
-        "rollout_undo_deployment",
-        "rollout_restart_deployment",
+        "delete_stresschaos",
         "escalate",
         "do_nothing",
     }
+    expected_name = "frontend-cpu-saturation"
+    incident_namespace = evidence.get("namespace") or "default"
 
     for action in actions:
         if action.action_type not in allowed_action_types:
@@ -104,7 +160,7 @@ def evaluate_plan_node(state: JudgeAgentState) -> dict[str, Any]:
                 "judge_verdict": "fail",
                 "judge_reason": (
                     f"Action {action.action_id!r} has unsupported action_type "
-                    f"{action.action_type!r} for crashloop Judge v0."
+                    f"{action.action_type!r} for cpu_saturation Judge v0."
                 ),
             }
         if not action.requires_approval:
@@ -122,17 +178,16 @@ def evaluate_plan_node(state: JudgeAgentState) -> dict[str, Any]:
                     f"Action {action.action_id!r} exceeds the blocked Blast Radius threshold."
                 ),
             }
-        if action.action_type in {"rollout_undo_deployment", "rollout_restart_deployment"}:
+        if action.action_type == "delete_stresschaos":
             action_namespace = action.parameters.get("namespace")
-            action_deployment = action.parameters.get("deployment")
-            incident_namespace = evidence.get("namespace") or "default"
-            if action_namespace != incident_namespace or action_deployment != target_deployment:
+            action_name = action.parameters.get("name")
+            if action_namespace != incident_namespace or action_name != expected_name:
                 return {
                     "judge_verdict": "fail",
                     "judge_reason": (
-                        f"Action {action.action_id!r} targets deployment "
-                        f"{action_deployment!r} in namespace {action_namespace!r}, "
-                        f"but the incident points to {target_deployment!r} in "
+                        f"Action {action.action_id!r} targets StressChaos "
+                        f"{action_name!r} in namespace {action_namespace!r}, "
+                        f"but the incident points to {expected_name!r} in "
                         f"namespace {incident_namespace!r}."
                     ),
                 }
@@ -140,8 +195,8 @@ def evaluate_plan_node(state: JudgeAgentState) -> dict[str, Any]:
     return {
         "judge_verdict": "pass",
         "judge_reason": (
-            "Crashloop plan is bounded, reversible, approval-gated, and limited to "
-            "supported v0 remediation actions."
+            "CPU saturation plan is bounded, approval-gated, and limited to the supported "
+            "v0 Chaos Mesh remediation action."
         ),
     }
 

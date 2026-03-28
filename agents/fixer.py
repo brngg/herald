@@ -159,6 +159,35 @@ def propose_actions_node(state: FixerAgentState) -> dict[str, Any]:
                 parameters={"namespace": namespace, "deployment": deployment},
             )
         )
+    elif incident_class == "cpu_saturation":
+        labels = evidence.get("labels")
+        deployment = None
+        if isinstance(labels, dict):
+            deployment = _infer_deployment_from_labels(labels)
+        deployment = deployment or "frontend"
+
+        actions.append(
+            RemediationAction(
+                action_id="delete_frontend_cpu_stresschaos",
+                action_type="delete_stresschaos",
+                description="Delete the active frontend CPU StressChaos object to remove synthetic saturation.",
+                confidence_score=0.9,
+                blast_radius_score=0.2,
+                requires_approval=True,
+                parameters={"namespace": namespace, "name": "frontend-cpu-saturation"},
+            )
+        )
+        actions.append(
+            RemediationAction(
+                action_id="escalate_frontend_cpu_saturation",
+                action_type="escalate",
+                description=f"Escalate {deployment} CPU saturation incident for deeper investigation.",
+                confidence_score=0.35,
+                blast_radius_score=0.0,
+                requires_approval=True,
+                parameters={"reason": "Bounded CPU remediation did not appear safe or sufficient."},
+            )
+        )
     else:
         errors.append(
             "unsupported incident_class for v0 Fixer: "

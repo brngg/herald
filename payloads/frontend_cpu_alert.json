@@ -1,0 +1,42 @@
+{
+  "receiver": "default/herald-webhook-routing/herald-webhook",
+  "status": "firing",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HeraldFrontendHighCPU",
+        "incident_class": "cpu_saturation",
+        "namespace": "default",
+        "pod": "frontend-6f7f7b6c8f-aaaaa",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "frontend pod is experiencing high CPU",
+        "description": "Frontend CPU usage is above the saturation threshold."
+      },
+      "startsAt": "2026-03-23T20:00:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus/graph",
+      "fingerprint": "cpu123"
+    }
+  ],
+  "groupLabels": {
+    "alertname": "HeraldFrontendHighCPU",
+    "incident_class": "cpu_saturation",
+    "namespace": "default"
+  },
+  "commonLabels": {
+    "alertname": "HeraldFrontendHighCPU",
+    "incident_class": "cpu_saturation",
+    "namespace": "default",
+    "severity": "warning"
+  },
+  "commonAnnotations": {
+    "summary": "frontend pod is experiencing high CPU"
+  },
+  "externalURL": "http://alertmanager",
+  "version": "4",
+  "groupKey": "{}/{namespace=\"default\"}:{alertname=\"HeraldFrontendHighCPU\"}",
+  "truncatedAlerts": 0
+}

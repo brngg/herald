@@ -1,0 +1,16 @@
+{
+  "scenario_id": "frontend_cpu_recovered",
+  "payload_file": "payloads/frontend_cpu_alert.json",
+  "approve_action_id": "delete_frontend_cpu_stresschaos",
+  "prometheus": {
+    "cpu_values": [0.08, 0.02],
+    "ready_values": [1.0],
+    "pre_check_retry_attempts": 1,
+    "post_check_retry_attempts": 1
+  },
+  "expected": {
+    "top_action_id": "delete_frontend_cpu_stresschaos",
+    "requires_approval": true,
+    "final_state": "recovered"
+  }
+}

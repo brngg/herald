@@ -23,7 +23,7 @@ class HITLDecision:
     decision_trace: DecisionTrace
 
 
-def route_crashloop_plan(
+def route_plan(
     *,
     incident: Incident,
     actions: list[RemediationAction],
@@ -69,6 +69,23 @@ def route_crashloop_plan(
         recommended_action=recommended_action,
         candidate_actions=ranked_actions,
         decision_trace=trace,
+    )
+
+
+def route_crashloop_plan(
+    *,
+    incident: Incident,
+    actions: list[RemediationAction],
+    fixer_rationale: str | None,
+    judge_verdict: str,
+    judge_reason: str,
+) -> HITLDecision:
+    return route_plan(
+        incident=incident,
+        actions=actions,
+        fixer_rationale=fixer_rationale,
+        judge_verdict=judge_verdict,
+        judge_reason=judge_reason,
     )
 
 

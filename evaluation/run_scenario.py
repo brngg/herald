@@ -13,7 +13,7 @@ from services.execution_worker import ExecutionWorkerClient
 from services.judge_llm import JudgeLLMResult
 from services.kubernetes_client import KubernetesClient
 from services.prometheus_client import PrometheusClient
-from workflows.recovery_workflow import run_crashloop_recovery_from_payload
+from workflows.recovery_workflow import run_recovery_from_payload
 
 
 def run_scenarios(
@@ -65,7 +65,7 @@ def _run_single_scenario(
     worker_client = _build_worker_client(scenario)
     judge_llm = _build_judge_llm(scenario)
 
-    result = run_crashloop_recovery_from_payload(
+    result = run_recovery_from_payload(
         payload,
         approve_action_id=scenario.get("approve_action_id"),
         reject_action_id=scenario.get("reject_action_id"),
@@ -89,14 +89,20 @@ def _build_prometheus_client(scenario: dict[str, Any]) -> PrometheusClient:
     prometheus_config = dict(scenario.get("prometheus", {}))
     crashloop_values = list(prometheus_config.get("crashloop_values", []))
     ready_values = list(prometheus_config.get("ready_values", []))
+    cpu_values = list(prometheus_config.get("cpu_values", []))
     default_crashloop = float(prometheus_config.get("default_crashloop", 0.0))
     default_ready = float(prometheus_config.get("default_ready", 0.0))
+    default_cpu = float(prometheus_config.get("default_cpu", 0.0))
 
     def query_runner(query: str) -> float:
         if "kube_pod_container_status_waiting_reason" in query:
             if crashloop_values:
                 return float(crashloop_values.pop(0))
             return default_crashloop
+        if "container_cpu_usage_seconds_total" in query:
+            if cpu_values:
+                return float(cpu_values.pop(0))
+            return default_cpu
         if "kube_pod_status_ready" in query:
             if ready_values:
                 return float(ready_values.pop(0))
@@ -126,6 +132,12 @@ def _build_kubernetes_client(scenario: dict[str, Any]) -> KubernetesClient:
             ),
         )
     )
+    stresschaos_status = dict(
+        kubernetes_config.get(
+            "stresschaos",
+            _completed_process_payload(0, '{"metadata":{"name":"frontend-cpu-saturation"}}', ""),
+        )
+    )
 
     def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
         if command[:3] == ["kubectl", "rollout", "status"]:
@@ -142,11 +154,25 @@ def _build_kubernetes_client(scenario: dict[str, Any]) -> KubernetesClient:
                 stdout=str(deployment_availability["stdout"]),
                 stderr=str(deployment_availability["stderr"]),
             )
+        if command[:3] == ["kubectl", "get", "stresschaos"]:
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=int(stresschaos_status["returncode"]),
+                stdout=str(stresschaos_status["stdout"]),
+                stderr=str(stresschaos_status["stderr"]),
+            )
         if command[:3] == ["kubectl", "rollout", "undo"]:
             return subprocess.CompletedProcess(
                 args=list(command),
                 returncode=0,
                 stdout="deployment.apps/cartservice rolled back\n",
+                stderr="",
+            )
+        if command[:3] == ["kubectl", "delete", "stresschaos"]:
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout='stresschaos.chaos-mesh.org "frontend-cpu-saturation" deleted\n',
                 stderr="",
             )
         raise AssertionError(f"Unexpected command: {command}")
@@ -176,6 +202,8 @@ dispatch = json.load(sys.stdin)
 command = ["kubectl", "rollout", "undo", "deployment/cartservice", "-n", "default"]
 if dispatch["action_type"] == "rollout_restart_deployment":
     command = ["kubectl", "rollout", "restart", "deployment/cartservice", "-n", "default"]
+if dispatch["action_type"] == "delete_stresschaos":
+    command = ["kubectl", "delete", "stresschaos", dispatch["parameters"]["name"], "-n", dispatch["parameters"]["namespace"]]
 result = {{
     "worker_id": dispatch["worker_id"],
     "action_id": dispatch["action_id"],

@@ -6,6 +6,7 @@ from typing import Any, Literal
 ActionTypes = Literal[
     "rollout_undo_deployment",
     "rollout_restart_deployment",
+    "delete_stresschaos",
     "set_deployment_env_var",
     "apply_k8s_manifest",
     "scale_deployment",
@@ -16,6 +17,7 @@ ActionTypes = Literal[
 VALID_ACTION_TYPES: tuple[ActionTypes, ...] = (
     "rollout_undo_deployment",
     "rollout_restart_deployment",
+    "delete_stresschaos",
     "set_deployment_env_var",
     "apply_k8s_manifest",
     "scale_deployment",
@@ -64,6 +66,11 @@ class RemediationAction:
         if self.action_type in ("rollout_undo_deployment", "rollout_restart_deployment"):
             _require_non_empty_string(self.parameters, "namespace", self.action_type)
             _require_non_empty_string(self.parameters, "deployment", self.action_type)
+            return
+
+        if self.action_type == "delete_stresschaos":
+            _require_non_empty_string(self.parameters, "namespace", self.action_type)
+            _require_non_empty_string(self.parameters, "name", self.action_type)
             return
 
         if self.action_type == "escalate":

@@ -67,6 +67,23 @@ class ExecutionSchemaTest(unittest.TestCase):
                 max_steps=5,
             )
 
+    def test_accepts_delete_stresschaos_dispatch(self) -> None:
+        dispatch = ExecutionDispatch(
+            incident_id="incident-123",
+            action_id="delete_frontend_cpu_stresschaos",
+            action_type="delete_stresschaos",
+            parameters={"namespace": "default", "name": "frontend-cpu-saturation"},
+            worker_id="worker-123",
+            requested_at="2026-03-27T03:00:00+00:00",
+            allowed_tool_names=[
+                "get_stresschaos",
+                "delete_stresschaos",
+            ],
+            max_steps=5,
+        )
+
+        self.assertEqual(dispatch.action_type, "delete_stresschaos")
+
     def test_accepts_valid_execution_result(self) -> None:
         result = ExecutionResult(
             worker_id="worker-123",

@@ -77,6 +77,27 @@ class KubernetesClient:
             "output": completed.stdout,
         }
 
+    def get_stresschaos(self, *, namespace: str, name: str) -> dict[str, object]:
+        command = [
+            "kubectl",
+            "get",
+            "stresschaos",
+            name,
+            "-n",
+            namespace,
+            "-o",
+            "json",
+        ]
+        completed = self._run(command)
+        return {
+            "status": "succeeded" if completed.returncode == 0 else "failed",
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "output": completed.stdout,
+        }
+
     def rollout_undo_deployment(self, *, namespace: str, deployment: str) -> dict[str, object]:
         command = [
             "kubectl",
@@ -113,6 +134,27 @@ class KubernetesClient:
             "action_type": "rollout_restart_deployment",
             "namespace": namespace,
             "deployment": deployment,
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+        }
+
+    def delete_stresschaos(self, *, namespace: str, name: str) -> dict[str, object]:
+        command = [
+            "kubectl",
+            "delete",
+            "stresschaos",
+            name,
+            "-n",
+            namespace,
+        ]
+        completed = self._run(command)
+        return {
+            "status": "succeeded" if completed.returncode == 0 else "failed",
+            "action_type": "delete_stresschaos",
+            "namespace": namespace,
+            "name": name,
             "command": command,
             "returncode": completed.returncode,
             "stdout": completed.stdout,

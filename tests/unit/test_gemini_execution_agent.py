@@ -82,6 +82,30 @@ def _tools() -> dict[str, ExecutionTool]:
             },
             mutation=True,
         ),
+        "get_stresschaos": ExecutionTool(
+            name="get_stresschaos",
+            description="inspect stresschaos",
+            callable=lambda **_: {
+                "status": "succeeded",
+                "returncode": 0,
+                "stdout": '{"metadata":{"name":"frontend-cpu-saturation"}}',
+                "stderr": "",
+                "command": ["kubectl", "get", "stresschaos", "frontend-cpu-saturation", "-o", "json"],
+            },
+            mutation=False,
+        ),
+        "delete_stresschaos": ExecutionTool(
+            name="delete_stresschaos",
+            description="delete stresschaos",
+            callable=lambda **_: {
+                "status": "succeeded",
+                "returncode": 0,
+                "stdout": 'stresschaos.chaos-mesh.org "frontend-cpu-saturation" deleted\n',
+                "stderr": "",
+                "command": ["kubectl", "delete", "stresschaos", "frontend-cpu-saturation", "-n", "default"],
+            },
+            mutation=True,
+        ),
     }
 
 
@@ -238,6 +262,55 @@ class GeminiExecutionAgentTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "malformed output"):
             agent.llm.decide_next_step(dispatch=_dispatch(), tool_transcript=[])
+
+    def test_agent_completes_delete_stresschaos_sequence(self) -> None:
+        dispatch = ExecutionDispatch(
+            incident_id="incident-456",
+            action_id="delete_frontend_cpu_stresschaos",
+            action_type="delete_stresschaos",
+            parameters={"namespace": "default", "name": "frontend-cpu-saturation"},
+            worker_id="worker-456",
+            requested_at="2026-03-27T03:00:00+00:00",
+            allowed_tool_names=["get_stresschaos", "delete_stresschaos"],
+            max_steps=3,
+        )
+        agent = GeminiExecutionAgent(
+            llm=_FakeExecutionAgentLLM(
+                [
+                    ExecutionAgentDecision(
+                        decision_type="tool_call",
+                        tool_name="get_stresschaos",
+                        arguments={"namespace": "default", "name": "frontend-cpu-saturation"},
+                        status="failed",
+                        summary="Inspect the active chaos object.",
+                    ),
+                    ExecutionAgentDecision(
+                        decision_type="tool_call",
+                        tool_name="delete_stresschaos",
+                        arguments={"namespace": "default", "name": "frontend-cpu-saturation"},
+                        status="failed",
+                        summary="Delete the approved chaos object.",
+                    ),
+                    ExecutionAgentDecision(
+                        decision_type="finish",
+                        tool_name="",
+                        arguments={},
+                        status="succeeded",
+                        summary="Deleted the active CPU saturation chaos object.",
+                    ),
+                ]
+            )
+        )
+
+        status, _, command, returncode, _, _, transcript = agent.run(
+            dispatch=dispatch,
+            tools=_tools(),
+        )
+
+        self.assertEqual(status, "succeeded")
+        self.assertEqual(returncode, 0)
+        self.assertEqual(command[:3], ["kubectl", "delete", "stresschaos"])
+        self.assertEqual([item["tool_name"] for item in transcript], ["get_stresschaos", "delete_stresschaos"])
 
 
 if __name__ == "__main__":

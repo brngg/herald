@@ -3,18 +3,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-PAYLOAD_FILE="${REPO_ROOT}/payloads/crashloop_alert.json"
+PAYLOAD_FILE="${REPO_ROOT}/payloads/frontend_cpu_alert.json"
 PYTHON_BIN="${PYTHON_BIN:-${REPO_ROOT}/.venv/bin/python}"
 PROM_URL="${PROMETHEUS_BASE_URL:-http://localhost:9090}"
 TIMESTAMP="$(date '+%Y%m%d-%H%M%S')"
-ARTIFACT_DIR="${ARTIFACT_DIR:-${REPO_ROOT}/artifacts/crashloop/${TIMESTAMP}}"
+ARTIFACT_DIR="${ARTIFACT_DIR:-${REPO_ROOT}/artifacts/frontend_cpu/${TIMESTAMP}}"
 PLAN_OUTPUT="${ARTIFACT_DIR}/first-pass.json"
 APPROVAL_OUTPUT="${ARTIFACT_DIR}/approval-run.json"
 REJECTION_OUTPUT="${ARTIFACT_DIR}/rejection-run.json"
 TERMINAL_LOG="${ARTIFACT_DIR}/worker-stream.log"
 APPLY_SCENARIO=true
 DECISION_MODE="prompt"
-PROM_QUERY='sum(max_over_time(kube_pod_container_status_waiting_reason{namespace="default",reason="CrashLoopBackOff",pod=~"cartservice-.*"}[2m]))'
+PROM_QUERY='sum(rate(container_cpu_usage_seconds_total{namespace="default",pod=~"frontend.*",container="server"}[5m]))'
 
 while [[ "${#}" -gt 0 ]]; do
   case "$1" in
@@ -40,7 +40,7 @@ while [[ "${#}" -gt 0 ]]; do
       ;;
     *)
       echo "Error: unknown argument '$1'" >&2
-      echo "Usage: ./scripts/run_crashloop_demo.sh [--skip-apply] [--auto-approve|--auto-reject] [--artifact-dir DIR]" >&2
+      echo "Usage: ./scripts/run_frontend_cpu_demo.sh [--skip-apply] [--auto-approve|--auto-reject] [--artifact-dir DIR]" >&2
       exit 1
       ;;
   esac
@@ -69,23 +69,13 @@ fi
 mkdir -p "${ARTIFACT_DIR}"
 
 if [[ "${APPLY_SCENARIO}" == "true" ]]; then
-  echo "== Applying crashloop scenario =="
-  kubectl apply -f "${REPO_ROOT}/k8s/crashloop-cartservice-bad-deploy.yaml"
+  echo "== Applying frontend CPU saturation scenario =="
+  kubectl apply -f "${REPO_ROOT}/k8s/chaos-frontend-cpu-saturation.yaml"
 fi
-
-echo
-echo "== Waiting for cartservice to enter a failing state =="
-for _ in $(seq 1 30); do
-  if kubectl get pods -n default | grep cartservice | grep -E "RunContainerError|CrashLoopBackOff" >/dev/null 2>&1; then
-    kubectl get pods -n default | grep cartservice
-    break
-  fi
-  sleep 2
-done
 
 wait_for_prometheus_signal() {
   echo
-  echo "== Waiting for Prometheus crashloop signal to catch up =="
+  echo "== Waiting for Prometheus CPU saturation signal to catch up =="
   for _ in $(seq 1 30); do
     RESPONSE="$(curl -sG "${PROM_URL%/}/api/v1/query" --data-urlencode "query=${PROM_QUERY}" || true)"
     VALUE="$("${PYTHON_BIN}" - <<'PY' "${RESPONSE}"
@@ -113,15 +103,22 @@ print(sample)
 PY
 )"
     if [[ "${VALUE}" != "0" && "${VALUE}" != "0.0" ]]; then
-      echo "Prometheus crashloop query is now ${VALUE}"
+      echo "Prometheus CPU saturation query is now ${VALUE}"
       return 0
     fi
     sleep 2
   done
 
-  echo "Warning: Prometheus crashloop signal did not turn positive before timeout." >&2
+  echo "Warning: Prometheus CPU saturation signal did not turn positive before timeout." >&2
   return 1
 }
+
+if [[ "${DECISION_MODE}" == "approve" || "${DECISION_MODE}" == "reject" ]]; then
+  if ! wait_for_prometheus_signal; then
+    echo "Refusing to continue because Prometheus never confirmed the CPU saturation signal." >&2
+    exit 1
+  fi
+fi
 
 echo
 echo "== Running HERALD planning pass =="
@@ -170,11 +167,6 @@ if [[ "${DECISION_MODE}" == "prompt" ]]; then
 fi
 
 if [[ "${DECISION_MODE}" == "approve" ]]; then
-  if ! wait_for_prometheus_signal; then
-    echo "Refusing to auto-approve because Prometheus never confirmed the crashloop signal." >&2
-    echo "You can wait for the scrape to catch up and rerun the helper, or inspect the cluster manually." >&2
-    exit 1
-  fi
   echo "== Running HERALD approval pass from saved first-pass artifact =="
   "${PYTHON_BIN}" -m workflows.recovery_workflow \
     --payload-file "${PAYLOAD_FILE}" \

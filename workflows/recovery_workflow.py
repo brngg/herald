@@ -13,6 +13,7 @@ from schemas.decision_trace import DecisionTrace
 from schemas.execution import ExecutionDispatch, ExecutionResult
 from schemas.remediation import RemediationAction
 from services.alertmanager_client import incidents_from_alertmanager_payload
+from services.incident_normalization import normalize_incident_class
 from services.decision_trace_provenance import append_node_run, derive_trace_timeline, initialize_trace_provenance
 from services.execution_worker import ExecutionWorkerClient
 from services.gemini_fixer_llm import GeminiFixerLLM
@@ -23,11 +24,11 @@ from workflows.hitl_gate import (
     HITLDecision,
     finalize_decision_trace,
     record_human_approval,
-    route_crashloop_plan,
+    route_plan,
 )
 
 
-def run_crashloop_recovery_from_payload(
+def run_recovery_from_payload(
     payload: dict[str, Any],
     *,
     approve_action_id: str | None = None,
@@ -43,15 +44,86 @@ def run_crashloop_recovery_from_payload(
 
     incidents = incidents_from_alertmanager_payload(payload)
     if len(incidents) != 1:
-        raise ValueError("Crashloop recovery demo expects exactly one incident per payload.")
+        raise ValueError("Recovery workflow expects exactly one incident per payload.")
 
     incident = incidents[0]
-    fixer_state, judge_state, hitl_decision = _plan_crashloop_recovery(
+    fixer_state, judge_state, hitl_decision = _plan_recovery(
         incident=incident,
         fixer_llm=fixer_llm,
         judge_llm=judge_llm,
     )
-    return _continue_crashloop_recovery(
+    return _continue_recovery(
+        incident=incident,
+        fixer_state=fixer_state,
+        judge_state=judge_state,
+        hitl_decision=hitl_decision,
+        approve_action_id=approve_action_id,
+        reject_action_id=reject_action_id,
+        kubernetes_client=kubernetes_client,
+        prometheus_client=prometheus_client,
+        execution_worker_client=execution_worker_client,
+    )
+
+
+def run_crashloop_recovery_from_payload(
+    payload: dict[str, Any],
+    *,
+    approve_action_id: str | None = None,
+    reject_action_id: str | None = None,
+    fixer_llm: Any = None,
+    judge_llm: Any = None,
+    kubernetes_client: KubernetesClient | None = None,
+    prometheus_client: PrometheusClient | None = None,
+    execution_worker_client: ExecutionWorkerClient | None = None,
+) -> dict[str, Any]:
+    return run_recovery_from_payload(
+        payload,
+        approve_action_id=approve_action_id,
+        reject_action_id=reject_action_id,
+        fixer_llm=fixer_llm,
+        judge_llm=judge_llm,
+        kubernetes_client=kubernetes_client,
+        prometheus_client=prometheus_client,
+        execution_worker_client=execution_worker_client,
+    )
+
+
+def run_recovery_from_saved_plan(
+    payload: dict[str, Any],
+    saved_result: dict[str, Any],
+    *,
+    approve_action_id: str | None = None,
+    reject_action_id: str | None = None,
+    kubernetes_client: KubernetesClient | None = None,
+    prometheus_client: PrometheusClient | None = None,
+    execution_worker_client: ExecutionWorkerClient | None = None,
+) -> dict[str, Any]:
+    if approve_action_id and reject_action_id:
+        raise ValueError("Specify either approve_action_id or reject_action_id, not both.")
+    if approve_action_id is None and reject_action_id is None:
+        raise ValueError("resume-from-file requires --approve-action-id or --reject-action-id.")
+
+    incidents = incidents_from_alertmanager_payload(payload)
+    if len(incidents) != 1:
+        raise ValueError("Recovery workflow expects exactly one incident per payload.")
+    incident = incidents[0]
+
+    fixer_state = _saved_mapping(saved_result.get("fixer_state"), field_name="fixer_state")
+    judge_state = _saved_mapping(saved_result.get("judge_state"), field_name="judge_state")
+    hitl_decision_payload = _saved_mapping(saved_result.get("hitl_decision"), field_name="hitl_decision")
+    decision_trace_payload = _saved_mapping(saved_result.get("decision_trace"), field_name="decision_trace")
+
+    hitl_decision = HITLDecision(
+        routing_decision=str(hitl_decision_payload["routing_decision"]),
+        requires_approval=bool(hitl_decision_payload["requires_approval"]),
+        recommended_action=_remediation_action_from_saved(hitl_decision_payload.get("recommended_action")),
+        candidate_actions=[
+            _remediation_action_from_saved(action_payload)
+            for action_payload in list(hitl_decision_payload.get("candidate_actions", []))
+        ],
+        decision_trace=_decision_trace_from_saved(decision_trace_payload),
+    )
+    return _continue_recovery(
         incident=incident,
         fixer_state=fixer_state,
         judge_state=judge_state,
@@ -74,36 +146,9 @@ def run_crashloop_recovery_from_saved_plan(
     prometheus_client: PrometheusClient | None = None,
     execution_worker_client: ExecutionWorkerClient | None = None,
 ) -> dict[str, Any]:
-    if approve_action_id and reject_action_id:
-        raise ValueError("Specify either approve_action_id or reject_action_id, not both.")
-    if approve_action_id is None and reject_action_id is None:
-        raise ValueError("resume-from-file requires --approve-action-id or --reject-action-id.")
-
-    incidents = incidents_from_alertmanager_payload(payload)
-    if len(incidents) != 1:
-        raise ValueError("Crashloop recovery demo expects exactly one incident per payload.")
-    incident = incidents[0]
-
-    fixer_state = _saved_mapping(saved_result.get("fixer_state"), field_name="fixer_state")
-    judge_state = _saved_mapping(saved_result.get("judge_state"), field_name="judge_state")
-    hitl_decision_payload = _saved_mapping(saved_result.get("hitl_decision"), field_name="hitl_decision")
-    decision_trace_payload = _saved_mapping(saved_result.get("decision_trace"), field_name="decision_trace")
-
-    hitl_decision = HITLDecision(
-        routing_decision=str(hitl_decision_payload["routing_decision"]),
-        requires_approval=bool(hitl_decision_payload["requires_approval"]),
-        recommended_action=_remediation_action_from_saved(hitl_decision_payload.get("recommended_action")),
-        candidate_actions=[
-            _remediation_action_from_saved(action_payload)
-            for action_payload in list(hitl_decision_payload.get("candidate_actions", []))
-        ],
-        decision_trace=_decision_trace_from_saved(decision_trace_payload),
-    )
-    return _continue_crashloop_recovery(
-        incident=incident,
-        fixer_state=fixer_state,
-        judge_state=judge_state,
-        hitl_decision=hitl_decision,
+    return run_recovery_from_saved_plan(
+        payload,
+        saved_result,
         approve_action_id=approve_action_id,
         reject_action_id=reject_action_id,
         kubernetes_client=kubernetes_client,
@@ -112,7 +157,7 @@ def run_crashloop_recovery_from_saved_plan(
     )
 
 
-def _plan_crashloop_recovery(
+def _plan_recovery(
     *,
     incident: Any,
     fixer_llm: Any = None,
@@ -127,7 +172,7 @@ def _plan_crashloop_recovery(
         fixer_rationale=fixer_state.get("fixer_rationale"),
         llm=judge_llm,
     )
-    hitl_decision = route_crashloop_plan(
+    hitl_decision = route_plan(
         incident=incident,
         actions=fixer_state["actions"],
         fixer_rationale=fixer_state.get("fixer_rationale"),
@@ -192,6 +237,46 @@ def _plan_crashloop_recovery(
         decision_trace=trace,
     )
     return fixer_state, judge_state, hitl_decision
+
+
+def _continue_recovery(
+    *,
+    incident: Any,
+    fixer_state: dict[str, Any],
+    judge_state: dict[str, Any],
+    hitl_decision: HITLDecision,
+    approve_action_id: str | None = None,
+    reject_action_id: str | None = None,
+    kubernetes_client: KubernetesClient | None = None,
+    prometheus_client: PrometheusClient | None = None,
+    execution_worker_client: ExecutionWorkerClient | None = None,
+) -> dict[str, Any]:
+    incident_class = normalize_incident_class(str(incident.incident_class))
+    if incident_class == "crashloop":
+        return _continue_crashloop_recovery(
+            incident=incident,
+            fixer_state=fixer_state,
+            judge_state=judge_state,
+            hitl_decision=hitl_decision,
+            approve_action_id=approve_action_id,
+            reject_action_id=reject_action_id,
+            kubernetes_client=kubernetes_client,
+            prometheus_client=prometheus_client,
+            execution_worker_client=execution_worker_client,
+        )
+    if incident_class == "cpu_saturation":
+        return _continue_cpu_saturation_recovery(
+            incident=incident,
+            fixer_state=fixer_state,
+            judge_state=judge_state,
+            hitl_decision=hitl_decision,
+            approve_action_id=approve_action_id,
+            reject_action_id=reject_action_id,
+            kubernetes_client=kubernetes_client,
+            prometheus_client=prometheus_client,
+            execution_worker_client=execution_worker_client,
+        )
+    raise ValueError(f"Unsupported incident_class for recovery workflow: {incident.incident_class!r}")
 
 
 def _continue_crashloop_recovery(
@@ -576,6 +661,294 @@ def _continue_crashloop_recovery(
     )
 
 
+def _continue_cpu_saturation_recovery(
+    *,
+    incident: Any,
+    fixer_state: dict[str, Any],
+    judge_state: dict[str, Any],
+    hitl_decision: HITLDecision,
+    approve_action_id: str | None = None,
+    reject_action_id: str | None = None,
+    kubernetes_client: KubernetesClient | None = None,
+    prometheus_client: PrometheusClient | None = None,
+    execution_worker_client: ExecutionWorkerClient | None = None,
+) -> dict[str, Any]:
+    if approve_action_id is None and reject_action_id is None:
+        decision_trace = hitl_decision.decision_trace
+        if hitl_decision.routing_decision == "halt":
+            decision_trace = finalize_decision_trace(
+                decision_trace,
+                execution_result={
+                    "status": "halted",
+                    "reason": "HITL Gate escalated the plan before execution.",
+                },
+                verification_result={
+                    "status": "not_run",
+                    "reason": "Execution did not start because the HITL Gate halted the plan.",
+                },
+                final_state="escalated",
+            )
+            decision_trace = _append_finalization_run(decision_trace)
+        return _build_result(
+            incident=incident,
+            fixer_state=fixer_state,
+            judge_state=judge_state,
+            hitl_decision=hitl_decision,
+            decision_trace=decision_trace,
+        )
+
+    if hitl_decision.routing_decision == "halt":
+        trace = finalize_decision_trace(
+            hitl_decision.decision_trace,
+            execution_result={
+                "status": "halted",
+                "reason": "HITL Gate escalated the plan before execution.",
+            },
+            verification_result={
+                "status": "not_run",
+                "reason": "Execution did not start because the HITL Gate halted the plan.",
+            },
+            final_state="escalated",
+        )
+        trace = _append_finalization_run(trace)
+        return _build_result(
+            incident=incident,
+            fixer_state=fixer_state,
+            judge_state=judge_state,
+            hitl_decision=hitl_decision,
+            decision_trace=trace,
+        )
+
+    if reject_action_id is not None:
+        rejected_action = _select_action(hitl_decision, reject_action_id)
+        trace = record_human_approval(
+            hitl_decision.decision_trace,
+            human_approval="rejected",
+            final_state="rejected",
+        )
+        trace = append_node_run(
+            trace,
+            node_name="human_approval",
+            status="rejected",
+            summary="Human operator rejected the proposed remediation action.",
+            input_summary={
+                "action_id": rejected_action.action_id,
+                "action_type": rejected_action.action_type,
+            },
+            output_summary={
+                "human_approval": "rejected",
+                "selected_action_id": rejected_action.action_id,
+            },
+        )
+        trace = finalize_decision_trace(
+            trace,
+            execution_result={
+                "status": "not_executed",
+                "action_id": rejected_action.action_id,
+                "action_type": rejected_action.action_type,
+                "reason": "Human rejected the proposed remediation action.",
+            },
+            verification_result={
+                "status": "not_run",
+                "reason": "Execution was skipped because the human operator rejected the proposed action.",
+            },
+            final_state="rejected",
+        )
+        trace = _append_finalization_run(trace)
+        return _build_result(
+            incident=incident,
+            fixer_state=fixer_state,
+            judge_state=judge_state,
+            hitl_decision=hitl_decision,
+            decision_trace=trace,
+        )
+
+    approved_action = _select_action(hitl_decision, approve_action_id)
+    trace = record_human_approval(
+        hitl_decision.decision_trace,
+        human_approval="approved",
+        final_state="executing",
+    )
+    trace = append_node_run(
+        trace,
+        node_name="human_approval",
+        status="approved",
+        summary="Human operator approved the proposed remediation action.",
+        input_summary={
+            "action_id": approved_action.action_id,
+            "action_type": approved_action.action_type,
+        },
+        output_summary={
+            "human_approval": "approved",
+            "selected_action_id": approved_action.action_id,
+        },
+    )
+
+    if approved_action.action_type != "delete_stresschaos":
+        final_state = "escalated"
+        execution_result = {
+            "status": "not_executed",
+            "action_id": approved_action.action_id,
+            "action_type": approved_action.action_type,
+            "reason": "Approved action does not execute the bounded CPU remediation step.",
+        }
+        verification_result = {
+            "status": "not_run",
+            "reason": "No automated execution was attempted because the approved action was non-executable.",
+        }
+        trace = finalize_decision_trace(
+            trace,
+            execution_result=execution_result,
+            verification_result=verification_result,
+            final_state=final_state,
+        )
+        trace = _append_finalization_run(trace)
+        return _build_result(
+            incident=incident,
+            fixer_state=fixer_state,
+            judge_state=judge_state,
+            hitl_decision=hitl_decision,
+            decision_trace=trace,
+        )
+
+    namespace = str(approved_action.parameters["namespace"])
+    deployment = _deployment_for_action(approved_action)
+    chaos_name = str(approved_action.parameters["name"])
+    prometheus = prometheus_client or PrometheusClient()
+    worker_client = execution_worker_client or ExecutionWorkerClient()
+
+    pre_check = prometheus.pre_check_cpu_saturation(namespace=namespace, deployment=deployment)
+    trace = append_node_run(
+        trace,
+        node_name="pre_check",
+        status=str(pre_check["status"]),
+        summary="Prometheus pre-check evaluated whether frontend CPU saturation recovery should execute.",
+        input_summary={
+            "namespace": namespace,
+            "deployment": deployment,
+            "chaos_name": chaos_name,
+        },
+        output_summary={
+            "status": pre_check["status"],
+            "cpu_usage": pre_check["cpu_usage"],
+            "attempts": pre_check["attempts"],
+            "should_execute": pre_check["should_execute"],
+        },
+    )
+    if not bool(pre_check["should_execute"]):
+        verification_result = {
+            "status": "recovered",
+            "reason": "Frontend CPU saturation was not firing at execution time.",
+            "pre_check": pre_check,
+        }
+        trace = finalize_decision_trace(
+            trace,
+            execution_result={
+                "status": "skipped",
+                "reason": "Pre-check determined no CPU saturation action was necessary.",
+            },
+            verification_result=verification_result,
+            final_state="recovered",
+        )
+        trace = _append_finalization_run(trace)
+        return _build_result(
+            incident=incident,
+            fixer_state=fixer_state,
+            judge_state=judge_state,
+            hitl_decision=hitl_decision,
+            decision_trace=trace,
+        )
+
+    dispatch = _build_execution_dispatch(incident_id=incident.incident_id, action=approved_action)
+    worker_handle = worker_client.dispatch_execution_worker(dispatch)
+    worker_result = worker_client.collect_execution_result(worker_handle)
+    execution_result = _build_execution_result(
+        action=approved_action,
+        dispatch=dispatch,
+        worker_result=worker_result,
+    )
+    trace = append_node_run(
+        trace,
+        node_name="execution_worker",
+        status=str(worker_result.status),
+        summary=_execution_worker_summary(worker_result.status),
+        llm_explanation=_execution_worker_llm_explanation(
+            action=approved_action,
+            worker_result=worker_result,
+        ),
+        input_summary={
+            "worker_id": dispatch.worker_id,
+            "action_id": dispatch.action_id,
+            "action_type": dispatch.action_type,
+        },
+        output_summary={
+            "worker_id": worker_result.worker_id,
+            "status": worker_result.status,
+            "action_id": worker_result.action_id,
+            "returncode": worker_result.returncode,
+            "tool_names": [entry.get("tool_name") for entry in worker_result.tool_transcript],
+        },
+    )
+    if execution_result["status"] != "succeeded":
+        trace = finalize_decision_trace(
+            trace,
+            execution_result=execution_result,
+            verification_result={
+                "pre_check": pre_check,
+                "post_check": {
+                    "status": "not_run",
+                    "reason": "Post-check did not run because the execution worker failed before CPU recovery verification.",
+                },
+            },
+            final_state="escalated",
+        )
+        trace = _append_finalization_run(trace)
+        return _build_result(
+            incident=incident,
+            fixer_state=fixer_state,
+            judge_state=judge_state,
+            hitl_decision=hitl_decision,
+            decision_trace=trace,
+        )
+
+    post_check = prometheus.post_check_cpu_saturation(namespace=namespace, deployment=deployment)
+    trace = append_node_run(
+        trace,
+        node_name="post_check",
+        status=str(post_check["status"]),
+        summary="Post-check verification evaluated whether frontend CPU saturation recovered after execution.",
+        input_summary={
+            "namespace": namespace,
+            "deployment": deployment,
+            "chaos_name": chaos_name,
+            "action_id": approved_action.action_id,
+        },
+        output_summary={
+            "status": post_check["status"],
+            "cpu_usage": post_check.get("cpu_usage"),
+            "ready_count": post_check.get("ready_count"),
+            "attempts": post_check.get("attempts"),
+        },
+    )
+    final_state = "recovered" if post_check["status"] == "recovered" else "escalated"
+    verification_result = {"pre_check": pre_check, "post_check": post_check}
+    verification_result["recovery_latency_seconds"] = _recovery_latency_seconds(dispatch.requested_at)
+    trace = finalize_decision_trace(
+        trace,
+        execution_result=execution_result,
+        verification_result=verification_result,
+        final_state=final_state,
+    )
+    trace = _append_finalization_run(trace)
+    return _build_result(
+        incident=incident,
+        fixer_state=fixer_state,
+        judge_state=judge_state,
+        hitl_decision=hitl_decision,
+        decision_trace=trace,
+    )
+
+
 def _select_action(hitl_decision: HITLDecision, action_id: str) -> RemediationAction:
     for action in hitl_decision.candidate_actions:
         if action.action_id == action_id:
@@ -603,13 +976,11 @@ def _build_execution_result(
     worker_result: ExecutionResult,
 ) -> dict[str, object]:
     namespace = str(action.parameters["namespace"])
-    deployment = str(action.parameters["deployment"])
-    return {
+    result: dict[str, object] = {
         "status": worker_result.status,
         "action_id": action.action_id,
         "action_type": action.action_type,
         "namespace": namespace,
-        "deployment": deployment,
         "worker_id": dispatch.worker_id,
         "dispatch_status": "succeeded",
         "dispatch": _to_jsonable(dispatch),
@@ -621,6 +992,11 @@ def _build_execution_result(
         "summary": worker_result.summary,
         "tool_transcript": worker_result.tool_transcript,
     }
+    if action.action_type == "delete_stresschaos":
+        result["name"] = str(action.parameters["name"])
+    else:
+        result["deployment"] = str(action.parameters["deployment"])
+    return result
 
 
 def _build_result(
@@ -716,7 +1092,12 @@ def _allowed_tool_names_for_action(action_type: str) -> list[str]:
             "get_rollout_status",
             "rollout_restart_deployment",
         ]
-    raise ValueError(f"Unsupported crashloop execution action: {action_type}")
+    if action_type == "delete_stresschaos":
+        return [
+            "get_stresschaos",
+            "delete_stresschaos",
+        ]
+    raise ValueError(f"Unsupported recovery execution action: {action_type}")
 
 
 def _execution_worker_summary(status: str) -> str:
@@ -733,7 +1114,7 @@ def _execution_worker_llm_explanation(
     narrative = _truncate_text(worker_result.summary, limit=300)
 
     namespace = str(action.parameters["namespace"])
-    deployment = str(action.parameters["deployment"])
+    target_label = _action_target_label(action)
     tool_names = [
         str(entry.get("tool_name"))
         for entry in worker_result.tool_transcript
@@ -761,7 +1142,7 @@ def _execution_worker_llm_explanation(
 
     base_explanation = (
         f"The Gemini execution agent handled approved action {action.action_id!r} "
-        f"({action.action_type}) for deployment {deployment!r} in namespace {namespace!r}. "
+        f"({action.action_type}) for {target_label} in namespace {namespace!r}. "
         f"{tool_clause} It executed {command_text!r}. {outcome_clause}{io_clause}"
     )
     if narrative:
@@ -913,9 +1294,21 @@ def _truncate_text(value: Any, limit: int = 200) -> str | None:
     return stripped[:limit] + "...<truncated>"
 
 
+def _deployment_for_action(action: RemediationAction) -> str:
+    if "deployment" in action.parameters:
+        return str(action.parameters["deployment"])
+    return "frontend"
+
+
+def _action_target_label(action: RemediationAction) -> str:
+    if action.action_type == "delete_stresschaos":
+        return f"StressChaos {str(action.parameters['name'])!r}"
+    return f"deployment {_deployment_for_action(action)!r}"
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run the crashloop recovery workflow from an Alertmanager payload."
+        description="Run the HERALD recovery workflow from an Alertmanager payload."
     )
     parser.add_argument("--payload-file", required=True)
     parser.add_argument("--resume-from-file")
@@ -968,7 +1361,7 @@ def main() -> int:
             saved_result = json.load(handle)
         if not isinstance(saved_result, dict):
             raise TypeError("resume-from-file JSON must be an object")
-        result = run_crashloop_recovery_from_saved_plan(
+        result = run_recovery_from_saved_plan(
             payload,
             saved_result,
             approve_action_id=args.approve_action_id,
@@ -985,7 +1378,7 @@ def main() -> int:
             judge_llm = GeminiJudgeLLM(model=args.judge_model)
 
         if args.interactive_hitl:
-            planning_result = run_crashloop_recovery_from_payload(
+            planning_result = run_recovery_from_payload(
                 payload,
                 fixer_llm=fixer_llm,
                 judge_llm=judge_llm,
@@ -997,7 +1390,7 @@ def main() -> int:
                 prometheus_client=prometheus_client,
             )
         else:
-            result = run_crashloop_recovery_from_payload(
+            result = run_recovery_from_payload(
                 payload,
                 approve_action_id=args.approve_action_id,
                 reject_action_id=args.reject_action_id,
@@ -1017,40 +1410,45 @@ def _continue_with_interactive_hitl(
     kubernetes_client: KubernetesClient | None = None,
     execution_worker_client: ExecutionWorkerClient | None = None,
     input_fn: Any = input,
+    output_fn: Any = print,
 ) -> dict[str, Any]:
     hitl_decision = planning_result["hitl_decision"]
     recommended_action = hitl_decision["recommended_action"]
     if recommended_action is None:
         return planning_result
 
-    action_id = recommended_action.action_id
-    action_type = recommended_action.action_type
-    print(
+    if isinstance(recommended_action, dict):
+        action_id = str(recommended_action["action_id"])
+        action_type = str(recommended_action["action_type"])
+    else:
+        action_id = recommended_action.action_id
+        action_type = recommended_action.action_type
+    output_fn(
         f"HITL Gate: recommended action {action_id} ({action_type}).",
         flush=True,
     )
-    print("Enter 1 to approve or 2 to reject.", flush=True)
-    user_choice = str(input_fn("> ")).strip()
-
-    if user_choice == "1":
-        return run_crashloop_recovery_from_saved_plan(
-            payload,
-            planning_result,
-            approve_action_id=action_id,
-            kubernetes_client=kubernetes_client,
-            prometheus_client=prometheus_client,
-            execution_worker_client=execution_worker_client,
-        )
-    if user_choice == "2":
-        return run_crashloop_recovery_from_saved_plan(
-            payload,
-            planning_result,
-            reject_action_id=action_id,
-            kubernetes_client=kubernetes_client,
-            prometheus_client=prometheus_client,
-            execution_worker_client=execution_worker_client,
-        )
-    return planning_result
+    output_fn("Enter 1 to approve or 2 to reject.", flush=True)
+    while True:
+        user_choice = str(input_fn("> ")).strip()
+        if user_choice == "1":
+            return run_recovery_from_saved_plan(
+                payload,
+                planning_result,
+                approve_action_id=action_id,
+                kubernetes_client=kubernetes_client,
+                prometheus_client=prometheus_client,
+                execution_worker_client=execution_worker_client,
+            )
+        if user_choice == "2":
+            return run_recovery_from_saved_plan(
+                payload,
+                planning_result,
+                reject_action_id=action_id,
+                kubernetes_client=kubernetes_client,
+                prometheus_client=prometheus_client,
+                execution_worker_client=execution_worker_client,
+            )
+        output_fn("Enter 1 to approve or 2 to reject.", flush=True)
 
 
 if __name__ == "__main__":

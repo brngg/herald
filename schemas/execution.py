@@ -7,25 +7,31 @@ from typing import Any, Literal
 ExecutionActionType = Literal[
     "rollout_undo_deployment",
     "rollout_restart_deployment",
+    "delete_stresschaos",
 ]
 ExecutionStatus = Literal["succeeded", "failed"]
 ExecutionToolName = Literal[
     "get_deployment_context",
     "get_rollout_status",
+    "get_stresschaos",
     "rollout_undo_deployment",
     "rollout_restart_deployment",
+    "delete_stresschaos",
 ]
 
 VALID_EXECUTION_ACTION_TYPES: tuple[ExecutionActionType, ...] = (
     "rollout_undo_deployment",
     "rollout_restart_deployment",
+    "delete_stresschaos",
 )
 VALID_EXECUTION_STATUSES: tuple[ExecutionStatus, ...] = ("succeeded", "failed")
 VALID_EXECUTION_TOOL_NAMES: tuple[ExecutionToolName, ...] = (
     "get_deployment_context",
     "get_rollout_status",
+    "get_stresschaos",
     "rollout_undo_deployment",
     "rollout_restart_deployment",
+    "delete_stresschaos",
 )
 
 
@@ -137,6 +143,15 @@ def _require_rollout_parameters(
     parameters: dict[str, Any],
     action_type: ExecutionActionType,
 ) -> None:
+    if action_type == "delete_stresschaos":
+        for key in ("namespace", "name"):
+            value = parameters.get(key)
+            if not isinstance(value, str):
+                raise TypeError(f"{action_type} parameters must include string {key!r}")
+            if not value:
+                raise ValueError(f"{action_type} parameters must include non-empty {key!r}")
+        return
+
     for key in ("namespace", "deployment"):
         value = parameters.get(key)
         if not isinstance(value, str):
@@ -173,5 +188,7 @@ def _require_allowed_tool_names(
 
 
 def _allowed_tools_for_action(action_type: ExecutionActionType) -> set[str]:
+    if action_type == "delete_stresschaos":
+        return {"get_stresschaos", "delete_stresschaos"}
     readonly_tools = {"get_deployment_context", "get_rollout_status"}
     return readonly_tools | {action_type}

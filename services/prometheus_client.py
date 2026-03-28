@@ -78,6 +78,58 @@ class PrometheusClient:
             },
         }
 
+    def pre_check_cpu_saturation(self, *, namespace: str, deployment: str) -> dict[str, object]:
+        cpu_query = _frontend_cpu_query(namespace=namespace, deployment=deployment)
+        cpu_usage = 0.0
+        attempts = max(1, self.pre_check_retry_attempts)
+
+        for attempt in range(1, attempts + 1):
+            cpu_usage = self._query(cpu_query)
+            if cpu_usage > 0.05:
+                break
+            if attempt < attempts:
+                self.sleep_fn(self.pre_check_retry_sleep_seconds)
+
+        return {
+            "status": "ready_to_execute" if cpu_usage > 0.05 else "not_firing",
+            "namespace": namespace,
+            "deployment": deployment,
+            "cpu_usage": cpu_usage,
+            "query": cpu_query,
+            "should_execute": cpu_usage > 0.05,
+            "attempts": attempts,
+        }
+
+    def post_check_cpu_saturation(self, *, namespace: str, deployment: str) -> dict[str, object]:
+        cpu_query = _frontend_cpu_query(namespace=namespace, deployment=deployment)
+        ready_query = _ready_query(namespace=namespace, deployment=deployment)
+        cpu_usage = 0.0
+        ready_count = 0.0
+        attempts = max(1, self.post_check_retry_attempts)
+        recovered = False
+
+        for attempt in range(1, attempts + 1):
+            cpu_usage = self._query(cpu_query)
+            ready_count = self._query(ready_query)
+            recovered = cpu_usage <= 0.05 and ready_count > 0
+            if recovered:
+                break
+            if attempt < attempts:
+                self.sleep_fn(self.post_check_retry_sleep_seconds)
+
+        return {
+            "status": "recovered" if recovered else "unrecovered",
+            "namespace": namespace,
+            "deployment": deployment,
+            "cpu_usage": cpu_usage,
+            "ready_count": ready_count,
+            "attempts": attempts,
+            "queries": {
+                "cpu": cpu_query,
+                "ready": ready_query,
+            },
+        }
+
     def _query(self, query: str) -> float:
         runner = self.query_runner
         if runner is not None:
@@ -118,6 +170,13 @@ def _ready_query(*, namespace: str, deployment: str) -> str:
     return (
         "sum(kube_pod_status_ready"
         f'{{namespace="{namespace}",condition="true",pod=~"{deployment}-.*"}})'
+    )
+
+
+def _frontend_cpu_query(*, namespace: str, deployment: str) -> str:
+    return (
+        "sum(rate(container_cpu_usage_seconds_total"
+        f'{{namespace="{namespace}",pod=~"{deployment}.*",container="server"}}[5m]))'
     )
 
 

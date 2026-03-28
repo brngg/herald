@@ -120,6 +120,19 @@ class RemediationActionSchemaTest(unittest.TestCase):
 
         self.assertEqual(action.parameters["reason"], "Automated remediation failed.")
 
+    def test_accepts_delete_stresschaos_action(self) -> None:
+        action = RemediationAction(
+            action_id="delete_frontend_cpu_stresschaos",
+            action_type="delete_stresschaos",
+            description="Delete the active frontend CPU StressChaos object.",
+            confidence_score=0.9,
+            blast_radius_score=0.2,
+            requires_approval=True,
+            parameters={"namespace": "default", "name": "frontend-cpu-saturation"},
+        )
+
+        self.assertEqual(action.parameters["name"], "frontend-cpu-saturation")
+
 
 if __name__ == "__main__":
     unittest.main()

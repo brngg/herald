@@ -84,8 +84,11 @@ class FixerTest(unittest.TestCase):
         state.update(propose_actions_node(state))
         state.update(finalize_plan_node(state))
 
-        self.assertEqual(len(state["actions"]), 0)
-        self.assertIn("Errors:", state["raw_plan"])
+        self.assertEqual(len(state["actions"]), 2)
+        self.assertEqual(state["actions"][0].action_type, "delete_stresschaos")
+        self.assertEqual(state["actions"][0].parameters["name"], "frontend-cpu-saturation")
+        self.assertEqual(state["actions"][1].action_type, "escalate")
+        self.assertNotIn("Errors:", state["raw_plan"])
 
     def test_run_fixer_for_alertmanager_payload_ingests_and_runs(self) -> None:
         results = run_fixer_for_alertmanager_payload(_sample_payload())

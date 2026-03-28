@@ -193,6 +193,78 @@ class ExecutionWorkerTest(unittest.TestCase):
         self.assertIn("malformed Gemini output", result.summary)
         self.assertEqual(result.tool_transcript, [])
 
+    def test_execute_dispatch_supports_delete_stresschaos(self) -> None:
+        commands: list[list[str]] = []
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            if command[:3] == ["kubectl", "get", "stresschaos"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout='{"metadata":{"name":"frontend-cpu-saturation"}}',
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout='stresschaos.chaos-mesh.org "frontend-cpu-saturation" deleted\n',
+                stderr="",
+            )
+
+        dispatch = ExecutionDispatch(
+            incident_id="incident-456",
+            action_id="delete_frontend_cpu_stresschaos",
+            action_type="delete_stresschaos",
+            parameters={"namespace": "default", "name": "frontend-cpu-saturation"},
+            worker_id="worker-456",
+            requested_at="2026-03-27T03:00:00+00:00",
+            allowed_tool_names=["get_stresschaos", "delete_stresschaos"],
+            max_steps=3,
+        )
+        llm = _FakeExecutionAgentLLM(
+            [
+                ExecutionAgentDecision(
+                    decision_type="tool_call",
+                    tool_name="get_stresschaos",
+                    arguments={"namespace": "default", "name": "frontend-cpu-saturation"},
+                    status="failed",
+                    summary="Inspect the active chaos object before deletion.",
+                ),
+                ExecutionAgentDecision(
+                    decision_type="tool_call",
+                    tool_name="delete_stresschaos",
+                    arguments={"namespace": "default", "name": "frontend-cpu-saturation"},
+                    status="failed",
+                    summary="Delete the approved CPU saturation chaos object.",
+                ),
+                ExecutionAgentDecision(
+                    decision_type="finish",
+                    tool_name="",
+                    arguments={},
+                    status="succeeded",
+                    summary="Deleted the active CPU saturation chaos object successfully.",
+                ),
+            ]
+        )
+
+        result = execute_dispatch(
+            dispatch,
+            kubernetes_client=KubernetesClient(runner=runner),
+            llm=llm,
+        )
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.tool_transcript[0]["tool_name"], "get_stresschaos")
+        self.assertEqual(result.tool_transcript[1]["tool_name"], "delete_stresschaos")
+        self.assertEqual(
+            commands,
+            [
+                ["kubectl", "get", "stresschaos", "frontend-cpu-saturation", "-n", "default", "-o", "json"],
+                ["kubectl", "delete", "stresschaos", "frontend-cpu-saturation", "-n", "default"],
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

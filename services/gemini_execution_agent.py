@@ -471,6 +471,10 @@ def _valid_tool_names() -> tuple[ExecutionToolName, ...]:
     return (
         "get_deployment_context",
         "get_rollout_status",
+        "get_stresschaos",
+        "get_networkchaos",
         "rollout_undo_deployment",
         "rollout_restart_deployment",
+        "delete_stresschaos",
+        "delete_networkchaos",
     )

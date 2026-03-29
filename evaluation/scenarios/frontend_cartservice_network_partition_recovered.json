@@ -1,0 +1,24 @@
+{
+  "scenario_id": "frontend_cartservice_network_partition_recovered",
+  "description": "Frontend-to-cartservice network partition recovery succeeds after approval.",
+  "payload_file": "payloads/frontend_cartservice_network_partition_alert.json",
+  "approve_action_id": "delete_frontend_cartservice_network_partition",
+  "prometheus": {
+    "network_receive_values": [0.0, 150.0],
+    "ready_values": [1.0],
+    "pre_check_retry_attempts": 1,
+    "post_check_retry_attempts": 1
+  },
+  "worker_result": {
+    "status": "succeeded",
+    "returncode": 0,
+    "stdout": "networkchaos.chaos-mesh.org \"frontend-to-cartservice-partition\" deleted\n",
+    "stderr": "",
+    "summary": "Agent completed the approved remediation."
+  },
+  "expected": {
+    "top_action_id": "delete_frontend_cartservice_network_partition",
+    "requires_approval": true,
+    "final_state": "recovered"
+  }
+}

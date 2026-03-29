@@ -217,6 +217,33 @@ def propose_actions_node(state: FixerAgentState) -> dict[str, Any]:
                 parameters={"reason": "Bounded frontend config remediation did not appear safe or sufficient."},
             )
         )
+    elif incident_class == "network_partition":
+        actions.append(
+            RemediationAction(
+                action_id="delete_frontend_cartservice_network_partition",
+                action_type="delete_networkchaos",
+                description="Delete the active frontend-to-cartservice NetworkChaos partition object.",
+                confidence_score=0.88,
+                blast_radius_score=0.2,
+                requires_approval=True,
+                parameters={
+                    "namespace": namespace,
+                    "name": "frontend-to-cartservice-partition",
+                    "deployment": "cartservice",
+                },
+            )
+        )
+        actions.append(
+            RemediationAction(
+                action_id="escalate_frontend_cartservice_network_partition",
+                action_type="escalate",
+                description="Escalate frontend-to-cartservice network partition incident for deeper investigation.",
+                confidence_score=0.25,
+                blast_radius_score=0.0,
+                requires_approval=True,
+                parameters={"reason": "Bounded partition remediation did not appear safe or sufficient."},
+            )
+        )
     else:
         errors.append(
             "unsupported incident_class for v0 Fixer: "

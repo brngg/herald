@@ -8,30 +8,36 @@ ExecutionActionType = Literal[
     "rollout_undo_deployment",
     "rollout_restart_deployment",
     "delete_stresschaos",
+    "delete_networkchaos",
 ]
 ExecutionStatus = Literal["succeeded", "failed"]
 ExecutionToolName = Literal[
     "get_deployment_context",
     "get_rollout_status",
     "get_stresschaos",
+    "get_networkchaos",
     "rollout_undo_deployment",
     "rollout_restart_deployment",
     "delete_stresschaos",
+    "delete_networkchaos",
 ]
 
 VALID_EXECUTION_ACTION_TYPES: tuple[ExecutionActionType, ...] = (
     "rollout_undo_deployment",
     "rollout_restart_deployment",
     "delete_stresschaos",
+    "delete_networkchaos",
 )
 VALID_EXECUTION_STATUSES: tuple[ExecutionStatus, ...] = ("succeeded", "failed")
 VALID_EXECUTION_TOOL_NAMES: tuple[ExecutionToolName, ...] = (
     "get_deployment_context",
     "get_rollout_status",
     "get_stresschaos",
+    "get_networkchaos",
     "rollout_undo_deployment",
     "rollout_restart_deployment",
     "delete_stresschaos",
+    "delete_networkchaos",
 )
 
 
@@ -143,7 +149,7 @@ def _require_rollout_parameters(
     parameters: dict[str, Any],
     action_type: ExecutionActionType,
 ) -> None:
-    if action_type == "delete_stresschaos":
+    if action_type in {"delete_stresschaos", "delete_networkchaos"}:
         for key in ("namespace", "name"):
             value = parameters.get(key)
             if not isinstance(value, str):
@@ -190,5 +196,7 @@ def _require_allowed_tool_names(
 def _allowed_tools_for_action(action_type: ExecutionActionType) -> set[str]:
     if action_type == "delete_stresschaos":
         return {"get_stresschaos", "delete_stresschaos"}
+    if action_type == "delete_networkchaos":
+        return {"get_networkchaos", "delete_networkchaos"}
     readonly_tools = {"get_deployment_context", "get_rollout_status"}
     return readonly_tools | {action_type}

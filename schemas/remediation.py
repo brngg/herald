@@ -7,6 +7,7 @@ ActionTypes = Literal[
     "rollout_undo_deployment",
     "rollout_restart_deployment",
     "delete_stresschaos",
+    "delete_networkchaos",
     "set_deployment_env_var",
     "apply_k8s_manifest",
     "scale_deployment",
@@ -18,6 +19,7 @@ VALID_ACTION_TYPES: tuple[ActionTypes, ...] = (
     "rollout_undo_deployment",
     "rollout_restart_deployment",
     "delete_stresschaos",
+    "delete_networkchaos",
     "set_deployment_env_var",
     "apply_k8s_manifest",
     "scale_deployment",
@@ -68,7 +70,7 @@ class RemediationAction:
             _require_non_empty_string(self.parameters, "deployment", self.action_type)
             return
 
-        if self.action_type == "delete_stresschaos":
+        if self.action_type in {"delete_stresschaos", "delete_networkchaos"}:
             _require_non_empty_string(self.parameters, "namespace", self.action_type)
             _require_non_empty_string(self.parameters, "name", self.action_type)
             return

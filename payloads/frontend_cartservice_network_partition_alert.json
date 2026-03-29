@@ -1,0 +1,42 @@
+{
+  "receiver": "default/herald-webhook-routing/herald-webhook",
+  "status": "firing",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HeraldCartserviceDependencyFailure",
+        "incident_class": "network_partition",
+        "namespace": "default",
+        "pod": "cartservice-7d6b9f5bb4-abcde",
+        "severity": "critical"
+      },
+      "annotations": {
+        "summary": "cartservice network traffic is near zero",
+        "description": "Cartservice is receiving near-zero network traffic. This may indicate a frontend-to-cartservice partition."
+      },
+      "startsAt": "2026-03-23T20:00:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus/graph",
+      "fingerprint": "network123"
+    }
+  ],
+  "groupLabels": {
+    "alertname": "HeraldCartserviceDependencyFailure",
+    "incident_class": "network_partition",
+    "namespace": "default"
+  },
+  "commonLabels": {
+    "alertname": "HeraldCartserviceDependencyFailure",
+    "incident_class": "network_partition",
+    "namespace": "default",
+    "severity": "critical"
+  },
+  "commonAnnotations": {
+    "summary": "cartservice network traffic is near zero"
+  },
+  "externalURL": "http://alertmanager",
+  "version": "4",
+  "groupKey": "{}/{namespace=\"default\"}:{alertname=\"HeraldCartserviceDependencyFailure\"}",
+  "truncatedAlerts": 0
+}

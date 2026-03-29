@@ -290,6 +290,18 @@ def _continue_recovery(
             prometheus_client=prometheus_client,
             execution_worker_client=execution_worker_client,
         )
+    if incident_class == "network_partition":
+        return _continue_network_partition_recovery(
+            incident=incident,
+            fixer_state=fixer_state,
+            judge_state=judge_state,
+            hitl_decision=hitl_decision,
+            approve_action_id=approve_action_id,
+            reject_action_id=reject_action_id,
+            kubernetes_client=kubernetes_client,
+            prometheus_client=prometheus_client,
+            execution_worker_client=execution_worker_client,
+        )
     raise ValueError(f"Unsupported incident_class for recovery workflow: {incident.incident_class!r}")
 
 
@@ -1243,6 +1255,304 @@ def _continue_cpu_saturation_recovery(
     )
 
 
+def _continue_network_partition_recovery(
+    *,
+    incident: Any,
+    fixer_state: dict[str, Any],
+    judge_state: dict[str, Any],
+    hitl_decision: HITLDecision,
+    approve_action_id: str | None = None,
+    reject_action_id: str | None = None,
+    kubernetes_client: KubernetesClient | None = None,
+    prometheus_client: PrometheusClient | None = None,
+    execution_worker_client: ExecutionWorkerClient | None = None,
+) -> dict[str, Any]:
+    if approve_action_id is None and reject_action_id is None:
+        decision_trace = hitl_decision.decision_trace
+        if hitl_decision.routing_decision == "halt":
+            decision_trace = finalize_decision_trace(
+                decision_trace,
+                execution_result={
+                    "status": "halted",
+                    "reason": "HITL Gate escalated the plan before execution.",
+                },
+                verification_result={
+                    "status": "not_run",
+                    "reason": "Execution did not start because the HITL Gate halted the plan.",
+                },
+                final_state="escalated",
+            )
+            decision_trace = _append_finalization_run(decision_trace)
+        return _build_result(
+            incident=incident,
+            fixer_state=fixer_state,
+            judge_state=judge_state,
+            hitl_decision=hitl_decision,
+            decision_trace=decision_trace,
+        )
+
+    if hitl_decision.routing_decision == "halt":
+        trace = finalize_decision_trace(
+            hitl_decision.decision_trace,
+            execution_result={
+                "status": "halted",
+                "reason": "HITL Gate escalated the plan before execution.",
+            },
+            verification_result={
+                "status": "not_run",
+                "reason": "Execution did not start because the HITL Gate halted the plan.",
+            },
+            final_state="escalated",
+        )
+        trace = _append_finalization_run(trace)
+        return _build_result(
+            incident=incident,
+            fixer_state=fixer_state,
+            judge_state=judge_state,
+            hitl_decision=hitl_decision,
+            decision_trace=trace,
+        )
+
+    if reject_action_id is not None:
+        rejected_action = _select_action(hitl_decision, reject_action_id)
+        trace = record_human_approval(
+            hitl_decision.decision_trace,
+            human_approval="rejected",
+            final_state="rejected",
+        )
+        trace = append_node_run(
+            trace,
+            node_name="human_approval",
+            status="rejected",
+            summary="Human operator rejected the proposed remediation action.",
+            input_summary={
+                "action_id": rejected_action.action_id,
+                "action_type": rejected_action.action_type,
+            },
+            output_summary={
+                "human_approval": "rejected",
+                "selected_action_id": rejected_action.action_id,
+            },
+        )
+        trace = finalize_decision_trace(
+            trace,
+            execution_result={
+                "status": "not_executed",
+                "action_id": rejected_action.action_id,
+                "action_type": rejected_action.action_type,
+                "reason": "Human rejected the proposed remediation action.",
+            },
+            verification_result={
+                "status": "not_run",
+                "reason": "Execution was skipped because the human operator rejected the proposed action.",
+            },
+            final_state="rejected",
+        )
+        trace = _append_finalization_run(trace)
+        return _build_result(
+            incident=incident,
+            fixer_state=fixer_state,
+            judge_state=judge_state,
+            hitl_decision=hitl_decision,
+            decision_trace=trace,
+        )
+
+    approved_action = _select_action(hitl_decision, approve_action_id)
+    trace = record_human_approval(
+        hitl_decision.decision_trace,
+        human_approval="approved",
+        final_state="executing",
+    )
+    trace = append_node_run(
+        trace,
+        node_name="human_approval",
+        status="approved",
+        summary="Human operator approved the proposed remediation action.",
+        input_summary={
+            "action_id": approved_action.action_id,
+            "action_type": approved_action.action_type,
+        },
+        output_summary={
+            "human_approval": "approved",
+            "selected_action_id": approved_action.action_id,
+        },
+    )
+
+    if approved_action.action_type != "delete_networkchaos":
+        final_state = "escalated"
+        execution_result = {
+            "status": "not_executed",
+            "action_id": approved_action.action_id,
+            "action_type": approved_action.action_type,
+            "reason": "Approved action does not execute the bounded network partition remediation step.",
+        }
+        verification_result = {
+            "status": "not_run",
+            "reason": "No automated execution was attempted because the approved action was non-executable.",
+        }
+        trace = finalize_decision_trace(
+            trace,
+            execution_result=execution_result,
+            verification_result=verification_result,
+            final_state=final_state,
+        )
+        trace = _append_finalization_run(trace)
+        return _build_result(
+            incident=incident,
+            fixer_state=fixer_state,
+            judge_state=judge_state,
+            hitl_decision=hitl_decision,
+            decision_trace=trace,
+        )
+
+    namespace = str(approved_action.parameters["namespace"])
+    deployment = _deployment_for_action(approved_action)
+    chaos_name = str(approved_action.parameters["name"])
+    prometheus = prometheus_client or PrometheusClient()
+    worker_client = execution_worker_client or ExecutionWorkerClient()
+
+    pre_check = prometheus.pre_check_network_partition(namespace=namespace, deployment=deployment)
+    trace = append_node_run(
+        trace,
+        node_name="pre_check",
+        status=str(pre_check["status"]),
+        summary="Prometheus pre-check evaluated whether frontend-to-cartservice partition recovery should execute.",
+        input_summary={
+            "namespace": namespace,
+            "deployment": deployment,
+            "chaos_name": chaos_name,
+        },
+        output_summary={
+            "status": pre_check["status"],
+            "network_receive_rate": pre_check["network_receive_rate"],
+            "attempts": pre_check["attempts"],
+            "should_execute": pre_check["should_execute"],
+            "missing_network_telemetry": pre_check.get("missing_network_telemetry"),
+        },
+    )
+    if not bool(pre_check["should_execute"]):
+        final_state = "recovered" if pre_check["status"] == "not_firing" else "escalated"
+        verification_result = {
+            "status": pre_check["status"],
+            "reason": (
+                "Network-partition signal was not firing at execution time."
+                if pre_check["status"] == "not_firing"
+                else "Cartservice network telemetry was unavailable at execution time."
+            ),
+            "pre_check": pre_check,
+        }
+        trace = finalize_decision_trace(
+            trace,
+            execution_result={
+                "status": "skipped",
+                "reason": "Pre-check determined no network-partition action was necessary.",
+            },
+            verification_result=verification_result,
+            final_state=final_state,
+        )
+        trace = _append_finalization_run(trace)
+        return _build_result(
+            incident=incident,
+            fixer_state=fixer_state,
+            judge_state=judge_state,
+            hitl_decision=hitl_decision,
+            decision_trace=trace,
+        )
+
+    dispatch = _build_execution_dispatch(incident_id=incident.incident_id, action=approved_action)
+    worker_handle = worker_client.dispatch_execution_worker(dispatch)
+    worker_result = worker_client.collect_execution_result(worker_handle)
+    execution_result = _build_execution_result(
+        action=approved_action,
+        dispatch=dispatch,
+        worker_result=worker_result,
+    )
+    trace = append_node_run(
+        trace,
+        node_name="execution_worker",
+        status=str(worker_result.status),
+        summary=_execution_worker_summary(worker_result.status),
+        llm_explanation=_execution_worker_llm_explanation(
+            action=approved_action,
+            worker_result=worker_result,
+        ),
+        input_summary={
+            "worker_id": dispatch.worker_id,
+            "action_id": dispatch.action_id,
+            "action_type": dispatch.action_type,
+        },
+        output_summary={
+            "worker_id": worker_result.worker_id,
+            "status": worker_result.status,
+            "action_id": worker_result.action_id,
+            "returncode": worker_result.returncode,
+            "tool_names": [entry.get("tool_name") for entry in worker_result.tool_transcript],
+        },
+    )
+    if execution_result["status"] != "succeeded":
+        trace = finalize_decision_trace(
+            trace,
+            execution_result=execution_result,
+            verification_result={
+                "pre_check": pre_check,
+                "post_check": {
+                    "status": "not_run",
+                    "reason": "Post-check did not run because the execution worker failed before network partition verification.",
+                },
+            },
+            final_state="escalated",
+        )
+        trace = _append_finalization_run(trace)
+        return _build_result(
+            incident=incident,
+            fixer_state=fixer_state,
+            judge_state=judge_state,
+            hitl_decision=hitl_decision,
+            decision_trace=trace,
+        )
+
+    post_check = prometheus.post_check_network_partition(namespace=namespace, deployment=deployment)
+    trace = append_node_run(
+        trace,
+        node_name="post_check",
+        status=str(post_check["status"]),
+        summary=(
+            "Post-check verification evaluated whether frontend-to-cartservice "
+            "network partition recovered after execution."
+        ),
+        input_summary={
+            "namespace": namespace,
+            "deployment": deployment,
+            "chaos_name": chaos_name,
+            "action_id": approved_action.action_id,
+        },
+        output_summary={
+            "status": post_check["status"],
+            "network_receive_rate": post_check.get("network_receive_rate"),
+            "ready_count": post_check.get("ready_count"),
+            "attempts": post_check.get("attempts"),
+            "missing_network_telemetry": post_check.get("missing_network_telemetry"),
+        },
+    )
+    final_state = "recovered" if post_check["status"] == "recovered" else "escalated"
+    verification_result = {"pre_check": pre_check, "post_check": post_check}
+    verification_result["recovery_latency_seconds"] = _recovery_latency_seconds(dispatch.requested_at)
+    trace = finalize_decision_trace(
+        trace,
+        execution_result=execution_result,
+        verification_result=verification_result,
+        final_state=final_state,
+    )
+    trace = _append_finalization_run(trace)
+    return _build_result(
+        incident=incident,
+        fixer_state=fixer_state,
+        judge_state=judge_state,
+        hitl_decision=hitl_decision,
+        decision_trace=trace,
+    )
+
+
 def _select_action(hitl_decision: HITLDecision, action_id: str) -> RemediationAction:
     for action in hitl_decision.candidate_actions:
         if action.action_id == action_id:
@@ -1286,7 +1596,7 @@ def _build_execution_result(
         "summary": worker_result.summary,
         "tool_transcript": worker_result.tool_transcript,
     }
-    if action.action_type == "delete_stresschaos":
+    if action.action_type in {"delete_stresschaos", "delete_networkchaos"}:
         result["name"] = str(action.parameters["name"])
     else:
         result["deployment"] = str(action.parameters["deployment"])
@@ -1390,6 +1700,11 @@ def _allowed_tool_names_for_action(action_type: str) -> list[str]:
         return [
             "get_stresschaos",
             "delete_stresschaos",
+        ]
+    if action_type == "delete_networkchaos":
+        return [
+            "get_networkchaos",
+            "delete_networkchaos",
         ]
     raise ValueError(f"Unsupported recovery execution action: {action_type}")
 
@@ -1595,12 +1910,16 @@ def _truncate_text(value: Any, limit: int = 200) -> str | None:
 def _deployment_for_action(action: RemediationAction) -> str:
     if "deployment" in action.parameters:
         return str(action.parameters["deployment"])
+    if action.action_type == "delete_networkchaos":
+        return "cartservice"
     return "frontend"
 
 
 def _action_target_label(action: RemediationAction) -> str:
     if action.action_type == "delete_stresschaos":
         return f"StressChaos {str(action.parameters['name'])!r}"
+    if action.action_type == "delete_networkchaos":
+        return f"NetworkChaos {str(action.parameters['name'])!r}"
     return f"deployment {_deployment_for_action(action)!r}"
 
 

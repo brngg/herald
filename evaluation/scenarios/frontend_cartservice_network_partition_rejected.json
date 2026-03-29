@@ -1,0 +1,17 @@
+{
+  "scenario_id": "frontend_cartservice_network_partition_rejected",
+  "description": "The operator rejects the bounded network-partition remediation before execution.",
+  "payload_file": "payloads/frontend_cartservice_network_partition_alert.json",
+  "reject_action_id": "delete_frontend_cartservice_network_partition",
+  "prometheus": {
+    "network_receive_values": [0.0],
+    "ready_values": [1.0],
+    "pre_check_retry_attempts": 1,
+    "post_check_retry_attempts": 1
+  },
+  "expected": {
+    "top_action_id": "delete_frontend_cartservice_network_partition",
+    "requires_approval": true,
+    "final_state": "rejected"
+  }
+}

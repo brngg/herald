@@ -154,8 +154,10 @@ Checked-in chaos and alerting coverage currently includes:
 The crashloop and bad-config slices have been live-validated end to end in the local
 cluster. The CPU slice has also been live exercised through the new Gate 0/Gate 1
 watcher flow, but its sustained-high-load execution path is still timing-sensitive.
-The network slice is still part of the recommended bounded evaluation set, but is not
-implemented end to end yet.
+The network-partition slice is now implemented in the bounded v1 path and replay-tested.
+It has also been exercised through a live operator run far enough to prove the approval
+and safe-skip path, but the bounded `NetworkChaos` deletion has not yet been
+live-validated end to end.
 
 ---
 
@@ -176,7 +178,9 @@ Current implementation is strongest in:
 - a live-validated crashloop recovery workflow entrypoint
 - a full CPU saturation recovery slice for `frontend`, including Chaos Mesh deletion, approval-gated execution, and verification
 - a live-validated frontend bad-config recovery slice for `frontend`, including the `/cart` probe alert, approval-gated rollout rollback, and verified recovery
-- replay artifacts and metrics for crashloop, CPU saturation, and bad-config scenarios
+- a bounded network-partition recovery slice for `frontend -> cartservice`, including approval-gated NetworkChaos deletion and verification
+- a partially live-exercised network-partition operator path that safely skipped execution when the incident signal had already cleared
+- replay artifacts and metrics for crashloop, CPU saturation, bad-config, and network-partition scenarios
 
 Still not implemented end to end:
 

@@ -100,6 +100,45 @@ def _cpu_evidence() -> dict[str, object]:
     }
 
 
+def _network_partition_incident() -> Incident:
+    return Incident(
+        incident_id="judge-network123",
+        incident_class="network_partition",
+        detected_at=datetime.now(tz=timezone.utc),
+        source="prometheus",
+        raw_context={
+            "alert": {
+                "labels": {
+                    "alertname": "HeraldCartserviceDependencyFailure",
+                    "incident_class": "network_partition",
+                    "namespace": "default",
+                    "pod": "cartservice-7d6b9f5bb4-abcde",
+                    "severity": "critical",
+                },
+                "annotations": {
+                    "summary": "cartservice network traffic is near zero",
+                },
+            }
+        },
+    )
+
+
+def _network_partition_evidence() -> dict[str, object]:
+    return {
+        "incident_class": "network_partition",
+        "incident_class_normalized": "network_partition",
+        "alertname": "HeraldCartserviceDependencyFailure",
+        "namespace": "default",
+        "severity": "critical",
+        "summary": "cartservice network traffic is near zero",
+        "pod": "cartservice-7d6b9f5bb4-abcde",
+        "labels": {
+            "namespace": "default",
+            "pod": "cartservice-7d6b9f5bb4-abcde",
+        },
+    }
+
+
 def _crashloop_actions() -> list[RemediationAction]:
     return [
         RemediationAction(
@@ -273,6 +312,52 @@ class JudgeTest(unittest.TestCase):
 
         self.assertEqual(state["judge_verdict"], "fail")
         self.assertIn("frontend-cpu-saturation", state["judge_reason"])
+
+    def test_judge_passes_supported_network_partition_plan(self) -> None:
+        state = run_judge_pipeline(
+            incident=_network_partition_incident(),
+            evidence=_network_partition_evidence(),
+            incident_summary="[critical] network partition",
+            actions=[
+                RemediationAction(
+                    action_id="delete_frontend_cartservice_network_partition",
+                    action_type="delete_networkchaos",
+                    description="Delete the active frontend-to-cartservice NetworkChaos partition object.",
+                    confidence_score=0.88,
+                    blast_radius_score=0.2,
+                    requires_approval=True,
+                    parameters={
+                        "namespace": "default",
+                        "name": "frontend-to-cartservice-partition",
+                        "deployment": "cartservice",
+                    },
+                )
+            ],
+        )
+
+        self.assertEqual(state["judge_verdict"], "pass")
+        self.assertIn("Network-partition plan is bounded", state["judge_reason"])
+
+    def test_judge_fails_network_partition_plan_targeting_other_networkchaos(self) -> None:
+        state = run_judge_pipeline(
+            incident=_network_partition_incident(),
+            evidence=_network_partition_evidence(),
+            incident_summary="[critical] network partition",
+            actions=[
+                RemediationAction(
+                    action_id="delete_wrong_networkchaos",
+                    action_type="delete_networkchaos",
+                    description="Delete an unrelated NetworkChaos object.",
+                    confidence_score=0.8,
+                    blast_radius_score=0.2,
+                    requires_approval=True,
+                    parameters={"namespace": "default", "name": "wrong-partition"},
+                )
+            ],
+        )
+
+        self.assertEqual(state["judge_verdict"], "fail")
+        self.assertIn("frontend-to-cartservice-partition", state["judge_reason"])
 
     def test_judge_fails_unsupported_action_type_for_crashloop(self) -> None:
         state = run_judge_pipeline(

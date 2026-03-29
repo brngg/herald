@@ -19,6 +19,8 @@ class PrometheusClient:
     pre_check_retry_sleep_seconds: float = 2.0
     pre_check_lookback_window: str = "2m"
     cpu_check_rate_window: str = "1m"
+    network_partition_rate_window: str = "5m"
+    network_partition_receive_threshold: float = 100.0
     post_check_retry_attempts: int = 6
     post_check_retry_sleep_seconds: float = 5.0
     sleep_fn: SleepFn = time.sleep
@@ -213,6 +215,88 @@ class PrometheusClient:
             },
         }
 
+    def pre_check_network_partition(self, *, namespace: str, deployment: str) -> dict[str, object]:
+        network_query = _cartservice_network_receive_query(
+            namespace=namespace,
+            deployment=deployment,
+            rate_window=self.network_partition_rate_window,
+        )
+        receive_rate: float | None = None
+        attempts = max(1, self.pre_check_retry_attempts)
+        saw_network_data = False
+        saw_missing_network_telemetry = False
+        observed_partition = False
+
+        for attempt in range(1, attempts + 1):
+            receive_value = self._query_value(network_query)
+            if receive_value is None:
+                saw_missing_network_telemetry = True
+                if attempt < attempts:
+                    self.sleep_fn(self.pre_check_retry_sleep_seconds)
+                continue
+            saw_network_data = True
+            receive_rate = receive_value
+            if receive_rate < self.network_partition_receive_threshold:
+                observed_partition = True
+                break
+            if attempt < attempts:
+                self.sleep_fn(self.pre_check_retry_sleep_seconds)
+
+        return {
+            "status": "ready_to_execute" if observed_partition else ("not_firing" if saw_network_data else "unknown"),
+            "namespace": namespace,
+            "deployment": deployment,
+            "network_receive_rate": receive_rate,
+            "query": network_query,
+            "missing_network_telemetry": saw_missing_network_telemetry,
+            "should_execute": observed_partition,
+            "attempts": attempts,
+        }
+
+    def post_check_network_partition(self, *, namespace: str, deployment: str) -> dict[str, object]:
+        network_query = _cartservice_network_receive_query(
+            namespace=namespace,
+            deployment=deployment,
+            rate_window=self.network_partition_rate_window,
+        )
+        ready_query = _ready_query(namespace=namespace, deployment=deployment)
+        receive_rate: float | None = None
+        ready_count = 0.0
+        attempts = max(1, self.post_check_retry_attempts)
+        recovered = False
+        saw_network_data = False
+        saw_missing_network_telemetry = False
+
+        for attempt in range(1, attempts + 1):
+            receive_value = self._query_value(network_query)
+            ready_count = self._query_value(ready_query) or 0.0
+            if receive_value is None:
+                saw_missing_network_telemetry = True
+                if attempt < attempts:
+                    self.sleep_fn(self.post_check_retry_sleep_seconds)
+                continue
+            saw_network_data = True
+            receive_rate = receive_value
+            recovered = receive_rate >= self.network_partition_receive_threshold and ready_count > 0
+            if recovered:
+                break
+            if attempt < attempts:
+                self.sleep_fn(self.post_check_retry_sleep_seconds)
+
+        return {
+            "status": "recovered" if recovered else ("unrecovered" if saw_network_data else "unknown"),
+            "namespace": namespace,
+            "deployment": deployment,
+            "network_receive_rate": receive_rate,
+            "ready_count": ready_count,
+            "attempts": attempts,
+            "missing_network_telemetry": saw_missing_network_telemetry,
+            "queries": {
+                "network_receive_rate": network_query,
+                "ready": ready_query,
+            },
+        }
+
     def _query_value(self, query: str) -> float | None:
         runner = self.query_runner
         if runner is not None:
@@ -266,6 +350,13 @@ def _frontend_cpu_query(*, namespace: str, deployment: str, rate_window: str) ->
 
 def _frontend_cart_probe_query(*, namespace: str) -> str:
     return f'probe_success{{instance="http://frontend.{namespace}.svc.cluster.local/cart"}}'
+
+
+def _cartservice_network_receive_query(*, namespace: str, deployment: str, rate_window: str) -> str:
+    return (
+        "sum(rate(container_network_receive_bytes_total"
+        f'{{namespace="{namespace}",pod=~"{deployment}.*",interface="eth0"}}[{rate_window}]))'
+    )
 
 
 def _parse_query_value(payload: dict[str, object]) -> float | None:

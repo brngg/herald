@@ -85,6 +85,27 @@ def _bad_config_incident() -> Incident:
     )
 
 
+def _network_partition_incident() -> Incident:
+    return Incident(
+        incident_id="network123",
+        incident_class="network_partition",
+        detected_at=datetime.now(tz=timezone.utc),
+        source="prometheus",
+        raw_context={
+            "alert": {
+                "labels": {
+                    "alertname": "HeraldCartserviceDependencyFailure",
+                    "incident_class": "network_partition",
+                    "namespace": "default",
+                    "pod": "cartservice-7d6b9f5bb4-abcde",
+                    "severity": "critical",
+                },
+                "annotations": {"summary": "cartservice network traffic is near zero"},
+            }
+        },
+    )
+
+
 class FixerTest(unittest.TestCase):
     def test_crashloop_proposes_actions_for_incident_class_crashloop(self) -> None:
         state = initial_fixer_state(_crashloop_incident())
@@ -133,6 +154,21 @@ class FixerTest(unittest.TestCase):
         self.assertEqual(state["actions"][0].parameters["deployment"], "frontend")
         self.assertEqual(state["actions"][1].action_type, "escalate")
         self.assertIn("rollout_undo_frontend_bad_config", state["raw_plan"])
+
+    def test_network_partition_proposes_networkchaos_delete_actions(self) -> None:
+        state = initial_fixer_state(_network_partition_incident())
+        state.update(extract_evidence_node(state))
+        state.update(build_incident_summary_node(state))
+        state.update(propose_actions_node(state))
+        state.update(finalize_plan_node(state))
+
+        self.assertEqual(len(state["actions"]), 2)
+        self.assertEqual(state["actions"][0].action_id, "delete_frontend_cartservice_network_partition")
+        self.assertEqual(state["actions"][0].action_type, "delete_networkchaos")
+        self.assertEqual(state["actions"][0].parameters["name"], "frontend-to-cartservice-partition")
+        self.assertEqual(state["actions"][0].parameters["deployment"], "cartservice")
+        self.assertEqual(state["actions"][1].action_type, "escalate")
+        self.assertIn("delete_frontend_cartservice_network_partition", state["raw_plan"])
 
     def test_run_fixer_pipeline_uses_injected_llm(self) -> None:
         class StubLLM:

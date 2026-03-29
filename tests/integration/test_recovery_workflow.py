@@ -86,6 +86,8 @@ def _worker_client(
             command = ["kubectl", "rollout", "restart", f"deployment/{{deployment}}", "-n", namespace]
         elif dispatch["action_type"] == "delete_stresschaos":
             command = ["kubectl", "delete", "stresschaos", dispatch["parameters"]["name"], "-n", dispatch["parameters"]["namespace"]]
+        elif dispatch["action_type"] == "delete_networkchaos":
+            command = ["kubectl", "delete", "networkchaos", dispatch["parameters"]["name"], "-n", dispatch["parameters"]["namespace"]]
         result = {{
             "worker_id": dispatch["worker_id"],
             "action_id": dispatch["action_id"],
@@ -194,6 +196,51 @@ def _bad_config_payload() -> dict[str, object]:
         "externalURL": "http://alertmanager",
         "version": "4",
         "groupKey": '{}/{namespace="default"}:{alertname="HeraldFrontendCartProbeFailed"}',
+        "truncatedAlerts": 0,
+    }
+
+
+def _network_partition_payload() -> dict[str, object]:
+    return {
+        "receiver": "default/herald-webhook-routing/herald-webhook",
+        "status": "firing",
+        "alerts": [
+            {
+                "status": "firing",
+                "labels": {
+                    "alertname": "HeraldCartserviceDependencyFailure",
+                    "incident_class": "network_partition",
+                    "namespace": "default",
+                    "pod": "cartservice-7d6b9f5bb4-abcde",
+                    "severity": "critical",
+                },
+                "annotations": {
+                    "summary": "cartservice network traffic is near zero",
+                    "description": "Cartservice is receiving near-zero network traffic.",
+                },
+                "startsAt": "2026-03-23T20:00:00Z",
+                "endsAt": "0001-01-01T00:00:00Z",
+                "generatorURL": "http://prometheus/graph",
+                "fingerprint": "network123",
+            }
+        ],
+        "groupLabels": {
+            "alertname": "HeraldCartserviceDependencyFailure",
+            "incident_class": "network_partition",
+            "namespace": "default",
+        },
+        "commonLabels": {
+            "alertname": "HeraldCartserviceDependencyFailure",
+            "incident_class": "network_partition",
+            "namespace": "default",
+            "severity": "critical",
+        },
+        "commonAnnotations": {
+            "summary": "cartservice network traffic is near zero",
+        },
+        "externalURL": "http://alertmanager",
+        "version": "4",
+        "groupKey": '{}/{namespace="default"}:{alertname="HeraldCartserviceDependencyFailure"}',
         "truncatedAlerts": 0,
     }
 
@@ -1170,6 +1217,108 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         trace = result["decision_trace"]
         self.assertEqual(trace.human_approval, "approved")
         self.assertEqual(trace.final_state, "recovered")
+
+    def test_network_partition_workflow_requires_explicit_approval_before_execution(self) -> None:
+        result = run_recovery_from_payload(_network_partition_payload())
+
+        hitl = result["hitl_decision"]
+        trace = result["decision_trace"]
+
+        self.assertTrue(hitl["requires_approval"])
+        self.assertEqual(hitl["routing_decision"], "request_approval_single_action")
+        self.assertEqual(hitl["recommended_action"].action_id, "delete_frontend_cartservice_network_partition")
+        self.assertEqual(trace.human_approval, "n/a")
+        self.assertEqual(trace.final_state, "pending_approval")
+        self.assertEqual(set(trace.node_runs_by_node.keys()), {"fixer", "judge", "hitl_gate"})
+
+    def test_network_partition_workflow_executes_approved_delete_and_marks_recovered(self) -> None:
+        network_queries = iter([0.0, 150.0])
+
+        def query_runner(query: str) -> float:
+            if "container_network_receive_bytes_total" in query:
+                return next(network_queries)
+            if "kube_pod_status_ready" in query:
+                return 1.0
+            raise AssertionError(f"Unexpected query: {query}")
+
+        result = run_recovery_from_payload(
+            _network_partition_payload(),
+            approve_action_id="delete_frontend_cartservice_network_partition",
+            prometheus_client=PrometheusClient(query_runner=query_runner),
+            execution_worker_client=_worker_client(
+                stdout='networkchaos.chaos-mesh.org "frontend-to-cartservice-partition" deleted\n',
+            ),
+        )
+
+        trace = result["decision_trace"]
+
+        self.assertEqual(trace.human_approval, "approved")
+        self.assertEqual(trace.execution_result["status"], "succeeded")
+        self.assertEqual(trace.execution_result["action_type"], "delete_networkchaos")
+        self.assertEqual(trace.execution_result["name"], "frontend-to-cartservice-partition")
+        self.assertEqual(trace.verification_result["pre_check"]["status"], "ready_to_execute")
+        self.assertEqual(trace.verification_result["post_check"]["status"], "recovered")
+        self.assertEqual(trace.final_state, "recovered")
+        self.assertIn("execution_worker", trace.node_runs_by_node)
+        self.assertIn("post_check", trace.node_runs_by_node)
+
+    def test_network_partition_workflow_skips_execution_when_network_telemetry_is_missing(self) -> None:
+        def query_runner(query: str) -> float | None:
+            if "container_network_receive_bytes_total" in query:
+                return None
+            if "kube_pod_status_ready" in query:
+                return 1.0
+            raise AssertionError(f"Unexpected query: {query}")
+
+        result = run_recovery_from_payload(
+            _network_partition_payload(),
+            approve_action_id="delete_frontend_cartservice_network_partition",
+            prometheus_client=PrometheusClient(query_runner=query_runner),
+            execution_worker_client=_worker_client(
+                stdout='networkchaos.chaos-mesh.org "frontend-to-cartservice-partition" deleted\n',
+            ),
+        )
+
+        trace = result["decision_trace"]
+
+        self.assertEqual(trace.verification_result["pre_check"]["status"], "unknown")
+        self.assertFalse(trace.verification_result["pre_check"]["should_execute"])
+        self.assertEqual(trace.execution_result["status"], "skipped")
+        self.assertEqual(trace.final_state, "escalated")
+
+    def test_network_partition_workflow_marks_rejected_when_human_rejects_action(self) -> None:
+        result = run_recovery_from_payload(
+            _network_partition_payload(),
+            reject_action_id="delete_frontend_cartservice_network_partition",
+        )
+
+        trace = result["decision_trace"]
+
+        self.assertEqual(trace.human_approval, "rejected")
+        self.assertEqual(trace.execution_result["status"], "not_executed")
+        self.assertEqual(trace.final_state, "rejected")
+
+    def test_network_partition_workflow_surfaces_worker_failure_cleanly(self) -> None:
+        result = run_recovery_from_payload(
+            _network_partition_payload(),
+            approve_action_id="delete_frontend_cartservice_network_partition",
+            prometheus_client=PrometheusClient(
+                query_runner=lambda query: 0.0 if "container_network_receive_bytes_total" in query else 1.0,
+                sleep_fn=lambda _: None,
+            ),
+            execution_worker_client=_worker_client(
+                status="failed",
+                returncode=1,
+                stdout="",
+                stderr="worker failed",
+            ),
+        )
+
+        trace = result["decision_trace"]
+
+        self.assertEqual(trace.execution_result["status"], "failed")
+        self.assertEqual(trace.verification_result["post_check"]["status"], "not_run")
+        self.assertEqual(trace.final_state, "escalated")
 
 
 if __name__ == "__main__":

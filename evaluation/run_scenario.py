@@ -91,10 +91,12 @@ def _build_prometheus_client(scenario: dict[str, Any]) -> PrometheusClient:
     ready_values = list(prometheus_config.get("ready_values", []))
     cpu_values = list(prometheus_config.get("cpu_values", []))
     probe_values = list(prometheus_config.get("probe_values", []))
+    network_receive_values = list(prometheus_config.get("network_receive_values", []))
     default_crashloop = float(prometheus_config.get("default_crashloop", 0.0))
     default_ready = float(prometheus_config.get("default_ready", 0.0))
     default_cpu = float(prometheus_config.get("default_cpu", 0.0))
     default_probe = float(prometheus_config.get("default_probe", 0.0))
+    default_network_receive = float(prometheus_config.get("default_network_receive", 0.0))
 
     def query_runner(query: str) -> float:
         if "kube_pod_container_status_waiting_reason" in query:
@@ -113,6 +115,10 @@ def _build_prometheus_client(scenario: dict[str, Any]) -> PrometheusClient:
             if probe_values:
                 return float(probe_values.pop(0))
             return default_probe
+        if "container_network_receive_bytes_total" in query:
+            if network_receive_values:
+                return float(network_receive_values.pop(0))
+            return default_network_receive
         raise AssertionError(f"Unexpected query: {query}")
 
     return PrometheusClient(
@@ -144,6 +150,12 @@ def _build_kubernetes_client(scenario: dict[str, Any]) -> KubernetesClient:
             _completed_process_payload(0, '{"metadata":{"name":"frontend-cpu-saturation"}}', ""),
         )
     )
+    networkchaos_status = dict(
+        kubernetes_config.get(
+            "networkchaos",
+            _completed_process_payload(0, '{"metadata":{"name":"frontend-to-cartservice-partition"}}', ""),
+        )
+    )
 
     def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
         if command[:3] == ["kubectl", "rollout", "status"]:
@@ -167,6 +179,13 @@ def _build_kubernetes_client(scenario: dict[str, Any]) -> KubernetesClient:
                 stdout=str(stresschaos_status["stdout"]),
                 stderr=str(stresschaos_status["stderr"]),
             )
+        if command[:3] == ["kubectl", "get", "networkchaos"]:
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=int(networkchaos_status["returncode"]),
+                stdout=str(networkchaos_status["stdout"]),
+                stderr=str(networkchaos_status["stderr"]),
+            )
         if command[:3] == ["kubectl", "rollout", "undo"]:
             deployment = command[3].split("/", 1)[1] if len(command) > 3 and "/" in command[3] else "cartservice"
             return subprocess.CompletedProcess(
@@ -188,6 +207,13 @@ def _build_kubernetes_client(scenario: dict[str, Any]) -> KubernetesClient:
                 args=list(command),
                 returncode=0,
                 stdout='stresschaos.chaos-mesh.org "frontend-cpu-saturation" deleted\n',
+                stderr="",
+            )
+        if command[:3] == ["kubectl", "delete", "networkchaos"]:
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout='networkchaos.chaos-mesh.org "frontend-to-cartservice-partition" deleted\n',
                 stderr="",
             )
         raise AssertionError(f"Unexpected command: {command}")
@@ -221,6 +247,8 @@ if dispatch["action_type"] == "rollout_restart_deployment":
     command = ["kubectl", "rollout", "restart", f"deployment/{{deployment}}", "-n", namespace]
 if dispatch["action_type"] == "delete_stresschaos":
     command = ["kubectl", "delete", "stresschaos", dispatch["parameters"]["name"], "-n", dispatch["parameters"]["namespace"]]
+if dispatch["action_type"] == "delete_networkchaos":
+    command = ["kubectl", "delete", "networkchaos", dispatch["parameters"]["name"], "-n", dispatch["parameters"]["namespace"]]
 result = {{
     "worker_id": dispatch["worker_id"],
     "action_id": dispatch["action_id"],

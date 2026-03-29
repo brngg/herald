@@ -1,0 +1,24 @@
+{
+  "scenario_id": "frontend_cartservice_network_partition_worker_failure",
+  "description": "The execution worker fails during approved network-partition remediation, so the workflow escalates.",
+  "payload_file": "payloads/frontend_cartservice_network_partition_alert.json",
+  "approve_action_id": "delete_frontend_cartservice_network_partition",
+  "prometheus": {
+    "network_receive_values": [0.0],
+    "ready_values": [1.0],
+    "pre_check_retry_attempts": 1,
+    "post_check_retry_attempts": 1
+  },
+  "worker_result": {
+    "status": "failed",
+    "returncode": 1,
+    "stdout": "",
+    "stderr": "failed to delete networkchaos",
+    "summary": "Agent failed to complete the approved remediation."
+  },
+  "expected": {
+    "top_action_id": "delete_frontend_cartservice_network_partition",
+    "requires_approval": true,
+    "final_state": "escalated"
+  }
+}

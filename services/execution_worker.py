@@ -214,6 +214,12 @@ def _build_execution_tools(kubernetes: KubernetesClient) -> dict[ExecutionToolNa
             callable=kubernetes.get_stresschaos,
             mutation=False,
         ),
+        "get_networkchaos": ExecutionTool(
+            name="get_networkchaos",
+            description="Read the current Chaos Mesh NetworkChaos object for the approved scenario.",
+            callable=kubernetes.get_networkchaos,
+            mutation=False,
+        ),
         "rollout_undo_deployment": ExecutionTool(
             name="rollout_undo_deployment",
             description="Undo the approved Deployment rollout.",
@@ -230,6 +236,12 @@ def _build_execution_tools(kubernetes: KubernetesClient) -> dict[ExecutionToolNa
             name="delete_stresschaos",
             description="Delete the approved Chaos Mesh StressChaos object.",
             callable=kubernetes.delete_stresschaos,
+            mutation=True,
+        ),
+        "delete_networkchaos": ExecutionTool(
+            name="delete_networkchaos",
+            description="Delete the approved Chaos Mesh NetworkChaos object.",
+            callable=kubernetes.delete_networkchaos,
             mutation=True,
         ),
     }

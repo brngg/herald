@@ -98,6 +98,27 @@ class KubernetesClient:
             "output": completed.stdout,
         }
 
+    def get_networkchaos(self, *, namespace: str, name: str) -> dict[str, object]:
+        command = [
+            "kubectl",
+            "get",
+            "networkchaos",
+            name,
+            "-n",
+            namespace,
+            "-o",
+            "json",
+        ]
+        completed = self._run(command)
+        return {
+            "status": "succeeded" if completed.returncode == 0 else "failed",
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "output": completed.stdout,
+        }
+
     def rollout_undo_deployment(self, *, namespace: str, deployment: str) -> dict[str, object]:
         command = [
             "kubectl",
@@ -153,6 +174,27 @@ class KubernetesClient:
         return {
             "status": "succeeded" if completed.returncode == 0 else "failed",
             "action_type": "delete_stresschaos",
+            "namespace": namespace,
+            "name": name,
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+        }
+
+    def delete_networkchaos(self, *, namespace: str, name: str) -> dict[str, object]:
+        command = [
+            "kubectl",
+            "delete",
+            "networkchaos",
+            name,
+            "-n",
+            namespace,
+        ]
+        completed = self._run(command)
+        return {
+            "status": "succeeded" if completed.returncode == 0 else "failed",
+            "action_type": "delete_networkchaos",
             "namespace": namespace,
             "name": name,
             "command": command,

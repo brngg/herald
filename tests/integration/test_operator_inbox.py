@@ -157,6 +157,47 @@ class OperatorInboxIntegrationTest(unittest.TestCase):
             self.assertEqual(planning_result["decision_trace"].final_state, "pending_approval")
             self.assertEqual(planning_result["decision_trace"].execution_result, {})
 
+    def test_investigate_path_threads_shadow_engine_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            record = store_pending_alerts(_crashloop_payload(), inbox_root=tmpdir)[0]
+
+            def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+                if command[:3] == ["kubectl", "logs", "cartservice-7d6b9f5bb4-abcde"]:
+                    return subprocess.CompletedProcess(
+                        args=list(command),
+                        returncode=0,
+                        stdout="healthy\n",
+                        stderr="",
+                    )
+                if command[:3] == ["kubectl", "rollout", "history"]:
+                    return subprocess.CompletedProcess(
+                        args=list(command),
+                        returncode=0,
+                        stdout="deployment.apps/cartservice with revision #3\n",
+                        stderr="",
+                    )
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout='{"items": [], "metadata": {"name": "ok"}}',
+                    stderr="",
+                )
+
+            updated, planning_result = start_investigation_for_artifact(
+                record.artifact_dir,
+                engine_mode="v2_shadow",
+                prometheus_client=PrometheusClient(query_runner=lambda _: 1.0),
+                kubernetes_client=KubernetesClient(runner=runner),
+            )
+
+            self.assertEqual(updated.status, "pending_execution_approval")
+            self.assertEqual(planning_result["engine_mode"], "v2_shadow")
+            self.assertEqual(planning_result["decision_trace_timeline"][0]["node_name"], "observe")
+            self.assertEqual(planning_result["decision_trace_timeline"][1]["node_name"], "reason")
+            self.assertEqual(planning_result["decision_trace_timeline"][2]["node_name"], "critique")
+            self.assertEqual(planning_result["decision_trace_timeline"][3]["node_name"], "synthesize")
+            self.assertEqual(planning_result["decision_trace"].fixer_plan["v2_shadow"]["status"], "succeeded")
+
     def test_pending_alert_investigate_then_approve_or_reject_execution(self) -> None:
         for approval_choice, expected_approval, expected_final_state in (
             ("1", "approved", "recovered"),

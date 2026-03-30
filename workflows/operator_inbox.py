@@ -20,11 +20,18 @@ from services.alert_inbox import (
     update_inbox_record,
 )
 from services.gemini_fixer_llm import GeminiFixerLLM
+from services.gemini_critic_llm import GeminiCriticLLM
 from services.gemini_judge_llm import GeminiJudgeLLM
+from services.gemini_reasoner_llm import GeminiReasonerLLM
 from services.kubernetes_client import KubernetesClient
 from services.prometheus_client import PrometheusClient
 from services.execution_worker import ExecutionWorkerClient
-from workflows.recovery_workflow import _continue_with_interactive_hitl, run_recovery_from_payload
+from workflows.recovery_workflow import (
+    EngineMode,
+    VALID_ENGINE_MODES,
+    _continue_with_interactive_hitl,
+    run_recovery_from_payload,
+)
 
 
 def ignore_inbox_artifact(artifact_dir: str) -> InboxArtifactRecord:
@@ -42,9 +49,13 @@ def ignore_inbox_artifact(artifact_dir: str) -> InboxArtifactRecord:
 def start_investigation_for_artifact(
     artifact_dir: str,
     *,
+    engine_mode: EngineMode | str = "v1",
     fixer_llm: Any = None,
     judge_llm: Any = None,
+    reasoner_llm: Any = None,
+    critic_llm: Any = None,
     prometheus_client: PrometheusClient | None = None,
+    kubernetes_client: KubernetesClient | None = None,
 ) -> tuple[InboxArtifactRecord, dict[str, Any]]:
     record = update_inbox_record(
         artifact_dir,
@@ -54,9 +65,13 @@ def start_investigation_for_artifact(
     )
     planning_result = run_recovery_from_payload(
         record.raw_payload,
+        engine_mode=engine_mode,
         fixer_llm=fixer_llm,
         judge_llm=judge_llm,
+        reasoner_llm=reasoner_llm,
+        critic_llm=critic_llm,
         prometheus_client=prometheus_client,
+        kubernetes_client=kubernetes_client,
     )
     first_pass_path = save_workflow_artifact(
         artifact_dir,
@@ -128,8 +143,11 @@ def continue_execution_approval_for_artifact(
 def run_terminal_inbox_flow(
     *,
     inbox_root: str | None = None,
+    engine_mode: EngineMode | str = "v1",
     fixer_llm: Any = None,
     judge_llm: Any = None,
+    reasoner_llm: Any = None,
+    critic_llm: Any = None,
     prometheus_client: PrometheusClient | None = None,
     kubernetes_client: KubernetesClient | None = None,
     execution_worker_client: ExecutionWorkerClient | None = None,
@@ -168,8 +186,11 @@ def run_terminal_inbox_flow(
         return None
     return _handle_claimed_record(
         claimed,
+        engine_mode=engine_mode,
         fixer_llm=fixer_llm,
         judge_llm=judge_llm,
+        reasoner_llm=reasoner_llm,
+        critic_llm=critic_llm,
         prometheus_client=prometheus_client,
         kubernetes_client=kubernetes_client,
         execution_worker_client=execution_worker_client,
@@ -181,8 +202,11 @@ def run_terminal_inbox_flow(
 def run_terminal_inbox_watch(
     *,
     inbox_root: str | None = None,
+    engine_mode: EngineMode | str = "v1",
     fixer_llm: Any = None,
     judge_llm: Any = None,
+    reasoner_llm: Any = None,
+    critic_llm: Any = None,
     prometheus_client: PrometheusClient | None = None,
     kubernetes_client: KubernetesClient | None = None,
     execution_worker_client: ExecutionWorkerClient | None = None,
@@ -221,8 +245,11 @@ def run_terminal_inbox_watch(
             processed.append(
                 _handle_claimed_record(
                     claimed,
+                    engine_mode=engine_mode,
                     fixer_llm=fixer_llm,
                     judge_llm=judge_llm,
+                    reasoner_llm=reasoner_llm,
+                    critic_llm=critic_llm,
                     prometheus_client=prometheus_client,
                     kubernetes_client=kubernetes_client,
                     execution_worker_client=execution_worker_client,
@@ -245,8 +272,11 @@ def run_terminal_inbox_watch(
 def _handle_claimed_record(
     record: InboxArtifactRecord,
     *,
+    engine_mode: EngineMode | str = "v1",
     fixer_llm: Any = None,
     judge_llm: Any = None,
+    reasoner_llm: Any = None,
+    critic_llm: Any = None,
     prometheus_client: PrometheusClient | None = None,
     kubernetes_client: KubernetesClient | None = None,
     execution_worker_client: ExecutionWorkerClient | None = None,
@@ -284,9 +314,13 @@ def _handle_claimed_record(
 
     updated, planning_result = start_investigation_for_artifact(
         record.artifact_dir,
+        engine_mode=engine_mode,
         fixer_llm=fixer_llm,
         judge_llm=judge_llm,
+        reasoner_llm=reasoner_llm,
+        critic_llm=critic_llm,
         prometheus_client=prometheus_client,
+        kubernetes_client=kubernetes_client,
     )
     result: dict[str, Any] = {
         "gate0_decision": "investigate",
@@ -400,11 +434,28 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         choices=("heuristic", "gemini"),
         default="heuristic",
     )
+    parser.add_argument(
+        "--reasoner-provider",
+        choices=("heuristic", "gemini"),
+        default="heuristic",
+    )
+    parser.add_argument(
+        "--critic-provider",
+        choices=("heuristic", "gemini"),
+        default="heuristic",
+    )
     parser.add_argument("--fixer-model", default="gemini-2.5-flash")
     parser.add_argument("--judge-model", default="gemini-2.5-flash")
+    parser.add_argument("--reasoner-model", default="gemini-2.5-flash")
+    parser.add_argument("--critic-model", default="gemini-2.5-flash")
     parser.add_argument("--watch", action="store_true")
     parser.add_argument("--poll-interval-seconds", type=float, default=1.0)
     parser.add_argument("--claim-timeout-seconds", type=float, default=300.0)
+    parser.add_argument(
+        "--engine-mode",
+        choices=VALID_ENGINE_MODES,
+        default="v1",
+    )
     return parser
 
 
@@ -421,13 +472,22 @@ def main() -> int:
 
     fixer_llm = GeminiFixerLLM(model=args.fixer_model) if args.fixer_provider == "gemini" else None
     judge_llm = GeminiJudgeLLM(model=args.judge_model) if args.judge_provider == "gemini" else None
+    reasoner_llm = (
+        GeminiReasonerLLM(model=args.reasoner_model)
+        if args.reasoner_provider == "gemini"
+        else None
+    )
+    critic_llm = GeminiCriticLLM(model=args.critic_model) if args.critic_provider == "gemini" else None
     prometheus_client = PrometheusClient(base_url=args.prometheus_base_url)
     if args.watch:
         try:
             run_terminal_inbox_watch(
                 inbox_root=args.inbox_root,
+                engine_mode=args.engine_mode,
                 fixer_llm=fixer_llm,
                 judge_llm=judge_llm,
+                reasoner_llm=reasoner_llm,
+                critic_llm=critic_llm,
                 prometheus_client=prometheus_client,
                 poll_interval_seconds=args.poll_interval_seconds,
                 claim_timeout_seconds=args.claim_timeout_seconds,
@@ -438,8 +498,11 @@ def main() -> int:
 
     result = run_terminal_inbox_flow(
         inbox_root=args.inbox_root,
+        engine_mode=args.engine_mode,
         fixer_llm=fixer_llm,
         judge_llm=judge_llm,
+        reasoner_llm=reasoner_llm,
+        critic_llm=critic_llm,
         prometheus_client=prometheus_client,
         claim_timeout_seconds=args.claim_timeout_seconds,
     )

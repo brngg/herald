@@ -5,6 +5,7 @@ import sys
 import textwrap
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
 from services.execution_worker import ExecutionWorkerClient
 from services.kubernetes_client import KubernetesClient
@@ -264,6 +265,179 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
             ["fixer", "judge", "hitl_gate"],
         )
 
+    def test_v2_shadow_collects_observations_before_v1_planning(self) -> None:
+        commands: list[list[str]] = []
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            if command[:3] == ["kubectl", "logs", "cartservice-7d6b9f5bb4-abcde"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout="Authorization: bearer-token\nhealthy\n",
+                    stderr="",
+                )
+            if command[:3] == ["kubectl", "rollout", "history"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout="deployment.apps/cartservice with revision #3\n",
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout='{"items": [], "metadata": {"name": "ok"}}',
+                stderr="",
+            )
+
+        def query_runner(query: str) -> float:
+            if "kube_pod_container_status_waiting_reason" in query:
+                return 1.0
+            if "kube_pod_status_ready" in query:
+                return 1.0
+            raise AssertionError(f"Unexpected query: {query}")
+
+        result = run_crashloop_recovery_from_payload(
+            _crashloop_payload(),
+            engine_mode="v2_shadow",
+            kubernetes_client=KubernetesClient(runner=runner),
+            prometheus_client=PrometheusClient(query_runner=query_runner),
+        )
+
+        self.assertEqual(result["engine_mode"], "v2_shadow")
+        self.assertIsNotNone(result["observation_bundle"])
+        self.assertIsNotNone(result["reasoner_state"])
+        self.assertEqual(result["decision_trace_timeline"][0]["node_name"], "observe")
+        self.assertEqual(result["decision_trace_timeline"][1]["node_name"], "reason")
+        self.assertEqual(result["decision_trace_timeline"][2]["node_name"], "critique")
+        self.assertEqual(result["decision_trace_timeline"][3]["node_name"], "synthesize")
+        self.assertIn("observe", result["decision_trace"].node_runs_by_node)
+        self.assertIn("reason", result["decision_trace"].node_runs_by_node)
+        self.assertIn("critique", result["decision_trace"].node_runs_by_node)
+        self.assertIn("synthesize", result["decision_trace"].node_runs_by_node)
+        self.assertIn("deployment", result["observation_bundle"].kubernetes)
+        self.assertIn("incident_signal", result["observation_bundle"].prometheus)
+        self.assertIn("v2_shadow", result["decision_trace"].fixer_plan)
+        self.assertEqual(result["decision_trace"].fixer_plan["v2_shadow"]["status"], "succeeded")
+        self.assertTrue(result["decision_trace"].fixer_plan["v2_shadow"]["mapped_v1_candidates"])
+        self.assertIn("critic_output", result["decision_trace"].fixer_plan["v2_shadow"])
+        self.assertIn("policy_summary", result["decision_trace"].fixer_plan["v2_shadow"])
+        self.assertIn("synthesis_output", result["decision_trace"].fixer_plan["v2_shadow"])
+        self.assertIn("synthesized_v1_dispatches", result["decision_trace"].fixer_plan["v2_shadow"])
+        self.assertTrue(commands)
+
+    def test_v2_shadow_runs_verifier_for_all_benchmark_slices(self) -> None:
+        cases = [
+            (
+                "crashloop",
+                _crashloop_payload(),
+                "rollout_undo_cartservice",
+                {
+                    "kube_pod_container_status_waiting_reason": [1.0, 1.0, 0.0, 0.0, 0.0],
+                    "kube_pod_status_ready": [1.0, 1.0, 1.0, 1.0],
+                },
+                {},
+            ),
+            (
+                "cpu_saturation",
+                _cpu_payload(),
+                "delete_frontend_cpu_stresschaos",
+                {
+                    "container_cpu_usage_seconds_total": [0.08, 0.08, 0.02, 0.02, 0.02],
+                    "kube_pod_status_ready": [1.0, 1.0, 1.0, 1.0],
+                },
+                {},
+            ),
+            (
+                "bad_config",
+                _bad_config_payload(),
+                "rollout_undo_frontend_bad_config",
+                {
+                    "probe_success": [0.0, 0.0, 1.0, 1.0, 1.0],
+                    "kube_pod_status_ready": [1.0, 1.0, 1.0, 1.0],
+                },
+                {},
+            ),
+            (
+                "network_partition",
+                _network_partition_payload(),
+                "delete_frontend_cartservice_network_partition",
+                {
+                    "container_network_receive_bytes_total": [0.0, 0.0, 150.0, 150.0, 150.0],
+                    "kube_pod_status_ready": [1.0, 1.0, 1.0, 1.0],
+                },
+                {
+                    "stdout": '{"items": [], "metadata": {"name": "ok"}}',
+                },
+            ),
+        ]
+
+        for incident_class, payload, approve_action_id, query_sequences, runner_kwargs in cases:
+            with self.subTest(incident_class=incident_class):
+                query_iters = {needle: iter(values) for needle, values in query_sequences.items()}
+
+                def query_runner(query: str) -> float:
+                    for needle, iterator in query_iters.items():
+                        if needle in query:
+                            return next(iterator)
+                    raise AssertionError(f"Unexpected query: {query}")
+
+                commands: list[list[str]] = []
+
+                def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+                    commands.append(list(command))
+                    if tuple(command[:3]) in {
+                        ("kubectl", "get", "stresschaos"),
+                        ("kubectl", "get", "networkchaos"),
+                    }:
+                        return subprocess.CompletedProcess(
+                            args=list(command),
+                            returncode=1,
+                            stdout="",
+                            stderr="Not Found",
+                        )
+                    if command[:3] == ["kubectl", "get", "deployment"]:
+                        return subprocess.CompletedProcess(
+                            args=list(command),
+                            returncode=0,
+                            stdout='{"status": {"availableReplicas": 1, "readyReplicas": 1, "observedGeneration": 1}}',
+                            stderr="",
+                        )
+                    return subprocess.CompletedProcess(
+                        args=list(command),
+                        returncode=runner_kwargs.get("returncode", 0),
+                        stdout=str(runner_kwargs.get("stdout", "ok")),
+                        stderr=str(runner_kwargs.get("stderr", "")),
+                    )
+
+                result = run_recovery_from_payload(
+                    payload,
+                    engine_mode="v2_shadow",
+                    approve_action_id=approve_action_id,
+                    kubernetes_client=KubernetesClient(runner=runner),
+                    prometheus_client=PrometheusClient(query_runner=query_runner),
+                    execution_worker_client=_worker_client(
+                        stdout=str(runner_kwargs.get("worker_stdout", "approved remediation completed\n")),
+                    ),
+                )
+
+                trace = result["decision_trace"]
+                shadow = trace.fixer_plan["v2_shadow"]
+
+                self.assertEqual(result["engine_mode"], "v2_shadow")
+                self.assertEqual(result["verifier_state"]["verification_status"], "passed")
+                self.assertEqual(result["replanner_state"]["status"], "not_run")
+                self.assertEqual(shadow["verification_status"], "passed")
+                self.assertEqual(shadow["replanner_status"], "not_run")
+                self.assertIn("verification_plan", shadow)
+                self.assertIn("verification_result_v2", shadow)
+                self.assertEqual(result["decision_trace_timeline"][-2]["node_name"], "verify")
+                self.assertEqual(result["decision_trace_timeline"][-1]["node_name"], "finalization")
+                self.assertIn("verify", trace.node_runs_by_node)
+                self.assertNotIn("replan", trace.node_runs_by_node)
+                self.assertTrue(commands)
+
     def test_workflow_executes_approved_restart_and_marks_recovered(self) -> None:
         commands: list[list[str]] = []
 
@@ -276,7 +450,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
                 stderr="",
             )
 
-        crashloop_queries = iter([1.0, 0.0])
+        crashloop_queries = iter([1.0, 0.0, 0.0, 0.0])
 
         def query_runner(query: str) -> float:
             if "kube_pod_container_status_waiting_reason" in query:
@@ -411,7 +585,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
                 stderr="",
             )
 
-        crashloop_queries = iter([1.0, 0.0])
+        crashloop_queries = iter([1.0, 0.0, 0.0, 0.0])
 
         def query_runner(query: str) -> float:
             if "kube_pod_container_status_waiting_reason" in query:
@@ -438,6 +612,77 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
             commands,
             [["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"]],
         )
+
+    def test_resume_from_saved_plan_preserves_shadow_engine_mode(self) -> None:
+        def plan_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            if command[:3] == ["kubectl", "logs", "cartservice-7d6b9f5bb4-abcde"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout="healthy\n",
+                    stderr="",
+                )
+            if command[:3] == ["kubectl", "rollout", "history"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout="deployment.apps/cartservice with revision #3\n",
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout='{"items": [], "metadata": {"name": "ok"}}',
+                stderr="",
+            )
+
+        planning_result = run_crashloop_recovery_from_payload(
+            _crashloop_payload(),
+            engine_mode="v2_shadow",
+            kubernetes_client=KubernetesClient(runner=plan_runner),
+            prometheus_client=PrometheusClient(query_runner=lambda _: 1.0),
+        )
+
+        crashloop_queries = iter([1.0, 0.0, 0.0, 0.0])
+
+        def query_runner(query: str) -> float:
+            if "kube_pod_container_status_waiting_reason" in query:
+                return next(crashloop_queries)
+            if "kube_pod_status_ready" in query:
+                return 1.0
+            raise AssertionError(f"Unexpected query: {query}")
+
+        result = run_crashloop_recovery_from_saved_plan(
+            _crashloop_payload(),
+            planning_result,
+            approve_action_id="rollout_undo_cartservice",
+            kubernetes_client=KubernetesClient(
+                runner=lambda command: subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout="ok",
+                    stderr="",
+                )
+            ),
+            prometheus_client=PrometheusClient(query_runner=query_runner),
+            execution_worker_client=_worker_client(),
+        )
+
+        self.assertEqual(result["engine_mode"], "v2_shadow")
+        self.assertEqual(result["decision_trace_timeline"][0]["node_name"], "observe")
+        self.assertEqual(result["decision_trace_timeline"][1]["node_name"], "reason")
+        self.assertEqual(result["decision_trace_timeline"][2]["node_name"], "critique")
+        self.assertEqual(result["decision_trace_timeline"][3]["node_name"], "synthesize")
+        self.assertEqual(result["decision_trace_timeline"][-2]["node_name"], "verify")
+        self.assertEqual(result["decision_trace_timeline"][-1]["node_name"], "finalization")
+        self.assertIn("v2_shadow", result["decision_trace"].fixer_plan)
+        self.assertIsNotNone(result["synthesizer_state"])
+        self.assertIsNotNone(result["verifier_state"])
+        self.assertIsNotNone(result["replanner_state"])
+        self.assertEqual(result["verifier_state"]["verification_status"], "passed")
+        self.assertEqual(result["replanner_state"]["status"], "not_run")
+        self.assertEqual(result["decision_trace"].fixer_plan["v2_shadow"]["verification_status"], "passed")
+        self.assertEqual(result["decision_trace"].fixer_plan["v2_shadow"]["replanner_status"], "not_run")
 
     def test_interactive_hitl_choice_approves_recommended_action(self) -> None:
         planning_result = run_crashloop_recovery_from_payload(_crashloop_payload())
@@ -846,6 +1091,13 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
                     stdout="deployment.apps/cartservice rolled back\n",
                     stderr="",
                 )
+            if command[:3] == ["kubectl", "get", "deployment"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout='{"status": {"availableReplicas": 0, "readyReplicas": 0, "observedGeneration": 1}}',
+                    stderr="",
+                )
             raise AssertionError(f"Unexpected command: {command}")
 
         crashloop_queries = iter([1.0, 1.0, 0.0])
@@ -893,6 +1145,262 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
                 ["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"],
             ],
         )
+
+    def test_v2_shadow_records_unrecovered_verification_after_bounded_rollback(self) -> None:
+        commands: list[list[str]] = []
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            if command[:3] == ["kubectl", "rollout", "status"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout='deployment "cartservice" successfully rolled out\n',
+                    stderr="",
+                )
+            if command[:3] == ["kubectl", "rollout", "undo"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout="deployment.apps/cartservice rolled back\n",
+                    stderr="",
+                )
+            if command[:3] == ["kubectl", "get", "deployment"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout='{"status": {"availableReplicas": 0, "readyReplicas": 0, "observedGeneration": 1}}',
+                    stderr="",
+                )
+            raise AssertionError(f"Unexpected command: {command}")
+
+        crashloop_queries = iter([1.0, 1.0, 0.0, 0.0, 0.0, 0.0])
+        ready_queries = iter([1.0, 0.0, 1.0, 1.0, 1.0])
+
+        def query_runner(query: str) -> float:
+            if "kube_pod_container_status_waiting_reason" in query:
+                return next(crashloop_queries)
+            if "kube_pod_status_ready" in query:
+                return next(ready_queries)
+            raise AssertionError(f"Unexpected query: {query}")
+
+        prometheus = PrometheusClient(
+            query_runner=query_runner,
+            post_check_retry_attempts=1,
+            post_check_retry_sleep_seconds=0.0,
+            sleep_fn=lambda _: None,
+        )
+        kubernetes = KubernetesClient(runner=runner)
+        worker_client = _worker_client(stdout="deployment.apps/cartservice restarted\n")
+
+        result = run_crashloop_recovery_from_payload(
+            _crashloop_payload(),
+            engine_mode="v2_shadow",
+            approve_action_id="restart_cartservice",
+            kubernetes_client=kubernetes,
+            prometheus_client=prometheus,
+            execution_worker_client=worker_client,
+        )
+
+        trace = result["decision_trace"]
+        shadow = trace.fixer_plan["v2_shadow"]
+
+        self.assertTrue(trace.rollback_triggered)
+        self.assertEqual(trace.final_state, "rolled_back")
+        self.assertEqual(trace.verification_result["post_check"]["status"], "unrecovered")
+        self.assertEqual(result["verifier_state"]["verification_status"], "unrecovered")
+        self.assertEqual(result["replanner_state"]["status"], "succeeded")
+        self.assertEqual(result["replanner_state"]["replan_output"].decision, "escalate")
+        self.assertEqual(shadow["verification_status"], "unrecovered")
+        self.assertEqual(shadow["replanner_status"], "succeeded")
+        self.assertEqual(shadow["replan_output"]["decision"], "escalate")
+        self.assertIn("Rollback verification remains v1-only until Phase 5B.", shadow["verification_result_v2"]["warnings"])
+        self.assertEqual(result["decision_trace_timeline"][-3]["node_name"], "verify")
+        self.assertEqual(result["decision_trace_timeline"][-2]["node_name"], "replan")
+        self.assertEqual(result["decision_trace_timeline"][-1]["node_name"], "finalization")
+        self.assertIn(["kubectl", "rollout", "undo", "deployment/cartservice", "-n", "default"], commands)
+        self.assertIn(["kubectl", "get", "deployment", "cartservice", "-n", "default", "-o", "json"], commands)
+        self.assertEqual(commands[-1], ["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"])
+
+    def test_v2_shadow_replanner_proposes_alternative_intent_after_unrecovered_undo(self) -> None:
+        planning_result = run_crashloop_recovery_from_payload(
+            _crashloop_payload(),
+            engine_mode="v2_shadow",
+            kubernetes_client=KubernetesClient(
+                runner=lambda command: subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout="ok",
+                    stderr="",
+                )
+            ),
+            prometheus_client=PrometheusClient(query_runner=lambda _: 1.0),
+        )
+
+        crashloop_queries = iter([1.0, 1.0, 1.0])
+        ready_queries = iter([0.0, 0.0])
+
+        def query_runner(query: str) -> float:
+            if "kube_pod_container_status_waiting_reason" in query:
+                return next(crashloop_queries)
+            if "kube_pod_status_ready" in query:
+                return next(ready_queries)
+            raise AssertionError(f"Unexpected query: {query}")
+
+        result = run_crashloop_recovery_from_saved_plan(
+            _crashloop_payload(),
+            planning_result,
+            approve_action_id="rollout_undo_cartservice",
+            kubernetes_client=KubernetesClient(
+                runner=lambda command: subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout='deployment "cartservice" successfully rolled out\n',
+                    stderr="",
+                )
+            ),
+            prometheus_client=PrometheusClient(
+                query_runner=query_runner,
+                post_check_retry_attempts=1,
+                post_check_retry_sleep_seconds=0.0,
+                sleep_fn=lambda _: None,
+            ),
+            execution_worker_client=_worker_client(),
+        )
+
+        trace = result["decision_trace"]
+        shadow = trace.fixer_plan["v2_shadow"]
+
+        self.assertFalse(trace.rollback_triggered)
+        self.assertEqual(trace.final_state, "escalated")
+        self.assertEqual(result["verifier_state"]["verification_status"], "unrecovered")
+        self.assertEqual(result["replanner_state"]["status"], "succeeded")
+        self.assertEqual(result["replanner_state"]["replan_output"].decision, "propose_new_intent")
+        self.assertEqual(
+            result["replanner_state"]["replan_output"].intents[0].intent_id,
+            "reasoner-rollout-restart-cartservice",
+        )
+        self.assertEqual(shadow["verification_status"], "unrecovered")
+        self.assertEqual(shadow["replanner_status"], "succeeded")
+        self.assertEqual(shadow["replan_output"]["decision"], "propose_new_intent")
+        self.assertEqual(result["decision_trace_timeline"][-3]["node_name"], "verify")
+        self.assertEqual(result["decision_trace_timeline"][-2]["node_name"], "replan")
+        self.assertEqual(result["decision_trace_timeline"][-1]["node_name"], "finalization")
+
+    def test_v2_shadow_marks_verification_not_run_for_escalate_and_worker_failure(self) -> None:
+        planning_result = run_crashloop_recovery_from_payload(
+            _crashloop_payload(),
+            engine_mode="v2_shadow",
+            kubernetes_client=KubernetesClient(
+                runner=lambda command: subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout="ok",
+                    stderr="",
+                )
+            ),
+            prometheus_client=PrometheusClient(query_runner=lambda query: 1.0 if "kube_pod_container_status_waiting_reason" in query else 1.0),
+        )
+
+        escalate_action = RemediationAction(
+            action_id="escalate-cartservice-crashloop",
+            action_type="escalate",
+            description="Escalate to a human operator for deeper investigation.",
+            confidence_score=0.9,
+            blast_radius_score=0.1,
+            requires_approval=True,
+            parameters={"reason": "Automated remediation should not proceed."},
+        )
+        planning_result["hitl_decision"]["recommended_action"] = escalate_action
+        planning_result["hitl_decision"]["candidate_actions"] = [escalate_action]
+        planning_result["decision_trace"] = replace(
+            planning_result["decision_trace"],
+            fixer_plan={
+                "actions": [
+                    {
+                        "action_id": escalate_action.action_id,
+                        "action_type": escalate_action.action_type,
+                        "description": escalate_action.description,
+                        "confidence_score": escalate_action.confidence_score,
+                        "blast_radius_score": escalate_action.blast_radius_score,
+                        "requires_approval": escalate_action.requires_approval,
+                        "parameters": escalate_action.parameters,
+                    }
+                ],
+                "fixer_rationale": "",
+                "v2_shadow": planning_result["decision_trace"].fixer_plan["v2_shadow"],
+            },
+        )
+
+        escalate_result = _continue_with_interactive_hitl(
+            payload=_crashloop_payload(),
+            planning_result=planning_result,
+            prometheus_client=PrometheusClient(query_runner=lambda query: 1.0 if "kube_pod_container_status_ready" in query else 1.0),
+            input_fn=lambda _: "1",
+        )
+
+        self.assertEqual(escalate_result["decision_trace"].final_state, "escalated")
+        self.assertEqual(escalate_result["verifier_state"]["verification_status"], "not_run")
+        self.assertEqual(escalate_result["replanner_state"]["status"], "not_run")
+        self.assertEqual(escalate_result["decision_trace"].fixer_plan["v2_shadow"]["verification_status"], "not_run")
+        self.assertEqual(escalate_result["decision_trace"].fixer_plan["v2_shadow"]["replanner_status"], "not_run")
+
+        worker_failure_result = run_crashloop_recovery_from_payload(
+            _crashloop_payload(),
+            engine_mode="v2_shadow",
+            approve_action_id="rollout_undo_cartservice",
+            kubernetes_client=KubernetesClient(
+                runner=lambda command: subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout='deployment "cartservice" successfully rolled out\n',
+                    stderr="",
+                )
+            ),
+            prometheus_client=PrometheusClient(
+                query_runner=lambda query: 1.0 if "kube_pod_container_status_waiting_reason" in query else 1.0,
+            ),
+            execution_worker_client=_worker_client(
+                status="failed",
+                returncode=1,
+                stdout="",
+                stderr="worker failed",
+            ),
+        )
+
+        self.assertEqual(worker_failure_result["decision_trace"].final_state, "escalated")
+        self.assertEqual(worker_failure_result["verifier_state"]["verification_status"], "not_run")
+        self.assertEqual(worker_failure_result["replanner_state"]["status"], "not_run")
+        self.assertEqual(worker_failure_result["decision_trace"].fixer_plan["v2_shadow"]["verification_status"], "not_run")
+        self.assertEqual(worker_failure_result["decision_trace"].fixer_plan["v2_shadow"]["replanner_status"], "not_run")
+
+    def test_v2_shadow_surfaces_verification_failure_reason_in_trace_payload(self) -> None:
+        with patch(
+            "workflows.recovery_workflow.run_verification",
+            side_effect=RuntimeError("shadow verification exploded"),
+        ):
+            result = run_crashloop_recovery_from_payload(
+                _crashloop_payload(),
+                engine_mode="v2_shadow",
+                approve_action_id="rollout_undo_cartservice",
+                kubernetes_client=KubernetesClient(
+                    runner=lambda command: subprocess.CompletedProcess(
+                        args=list(command),
+                        returncode=0,
+                        stdout='deployment "cartservice" successfully rolled out\n',
+                        stderr="",
+                    )
+                ),
+                prometheus_client=PrometheusClient(
+                    query_runner=lambda query: 1.0,
+                ),
+                execution_worker_client=_worker_client(),
+            )
+
+        shadow = result["decision_trace"].fixer_plan["v2_shadow"]
+        self.assertEqual(result["verifier_state"]["verification_status"], "not_run")
+        self.assertIn("shadow verification exploded", result["verifier_state"]["failure_reason"])
+        self.assertIn("shadow verification exploded", shadow["verification_failure_reason"])
 
     def test_workflow_returns_escalated_trace_when_hitl_gate_halts(self) -> None:
         class FailingJudgeLLM:

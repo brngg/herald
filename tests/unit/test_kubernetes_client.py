@@ -7,6 +7,57 @@ from services.kubernetes_client import KubernetesClient
 
 
 class KubernetesClientTest(unittest.TestCase):
+    def test_get_resource_json_parses_kubectl_json_output(self) -> None:
+        commands: list[list[str]] = []
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout='{"metadata": {"name": "frontend"}}',
+                stderr="",
+            )
+
+        client = KubernetesClient(runner=runner)
+
+        result = client.get_resource_json(namespace="default", kind="deployment", name="frontend")
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["resource"]["metadata"]["name"], "frontend")
+        self.assertEqual(
+            commands,
+            [["kubectl", "get", "deployment", "frontend", "-n", "default", "-o", "json"]],
+        )
+
+    def test_get_pod_logs_includes_container_and_tail(self) -> None:
+        commands: list[list[str]] = []
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout="ok",
+                stderr="",
+            )
+
+        client = KubernetesClient(runner=runner)
+
+        result = client.get_pod_logs(
+            namespace="default",
+            pod="frontend-abcde",
+            container="server",
+            tail_lines=25,
+        )
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["output"], "ok")
+        self.assertEqual(
+            commands,
+            [["kubectl", "logs", "frontend-abcde", "-n", "default", "--tail=25", "-c", "server"]],
+        )
+
     def test_delete_stresschaos_uses_expected_command(self) -> None:
         commands: list[list[str]] = []
 
@@ -27,6 +78,31 @@ class KubernetesClientTest(unittest.TestCase):
         self.assertEqual(
             commands,
             [["kubectl", "delete", "stresschaos", "frontend-cpu-saturation", "-n", "default"]],
+        )
+
+    def test_delete_networkchaos_uses_expected_command(self) -> None:
+        commands: list[list[str]] = []
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout='networkchaos.chaos-mesh.org "frontend-to-cartservice-partition" deleted\n',
+                stderr="",
+            )
+
+        client = KubernetesClient(runner=runner)
+
+        result = client.delete_networkchaos(
+            namespace="default",
+            name="frontend-to-cartservice-partition",
+        )
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(
+            commands,
+            [["kubectl", "delete", "networkchaos", "frontend-to-cartservice-partition", "-n", "default"]],
         )
 
 

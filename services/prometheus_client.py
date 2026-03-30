@@ -3,10 +3,11 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 import time
-from typing import Callable
+from typing import Any, Callable
 
 
 PrometheusQueryRunner = Callable[[str], float | None]
+PrometheusRangeQueryRunner = Callable[[str, str, str, str], list[dict[str, Any]] | None]
 SleepFn = Callable[[float], None]
 
 
@@ -14,6 +15,7 @@ SleepFn = Callable[[float], None]
 class PrometheusClient:
     base_url: str | None = None
     query_runner: PrometheusQueryRunner | None = None
+    range_query_runner: PrometheusRangeQueryRunner | None = None
     timeout_seconds: float = 10.0
     pre_check_retry_attempts: int = 3
     pre_check_retry_sleep_seconds: float = 2.0
@@ -319,6 +321,101 @@ class PrometheusClient:
 
         return _parse_query_value(payload)
 
+    def query(self, query: str) -> dict[str, object]:
+        try:
+            value = self._query_value(query)
+        except Exception as exc:
+            return {
+                "status": "failed",
+                "query": query,
+                "error": str(exc),
+            }
+        return {
+            "status": "succeeded",
+            "query": query,
+            "value": value,
+        }
+
+    def range_query(
+        self,
+        *,
+        query: str,
+        start: str,
+        end: str,
+        step: str,
+    ) -> dict[str, object]:
+        runner = self.range_query_runner
+        if runner is not None:
+            try:
+                samples = runner(query, start, end, step)
+            except Exception as exc:
+                return {
+                    "status": "failed",
+                    "query": query,
+                    "start": start,
+                    "end": end,
+                    "step": step,
+                    "error": str(exc),
+                }
+            return {
+                "status": "succeeded",
+                "query": query,
+                "start": start,
+                "end": end,
+                "step": step,
+                "samples": list(samples or []),
+            }
+
+        base_url = self.base_url or os.environ.get("PROMETHEUS_BASE_URL")
+        if not base_url:
+            return {
+                "status": "failed",
+                "query": query,
+                "start": start,
+                "end": end,
+                "step": step,
+                "error": "PROMETHEUS_BASE_URL is required for Prometheus range queries.",
+            }
+
+        import httpx
+
+        try:
+            with httpx.Client(timeout=self.timeout_seconds) as client:
+                response = client.get(
+                    f"{base_url.rstrip('/')}/api/v1/query_range",
+                    params={
+                        "query": query,
+                        "start": start,
+                        "end": end,
+                        "step": step,
+                    },
+                )
+                response.raise_for_status()
+                payload = response.json()
+            return {
+                "status": "succeeded",
+                "query": query,
+                "start": start,
+                "end": end,
+                "step": step,
+                "samples": _parse_range_query_samples(payload),
+            }
+        except Exception as exc:
+            return {
+                "status": "failed",
+                "query": query,
+                "start": start,
+                "end": end,
+                "step": step,
+                "error": str(exc),
+            }
+
+    def raw_metric_snapshot(self, queries: dict[str, str]) -> dict[str, dict[str, object]]:
+        snapshot: dict[str, dict[str, object]] = {}
+        for name, query in queries.items():
+            snapshot[name] = self.query(query)
+        return snapshot
+
 
 def _crashloop_query(*, namespace: str, deployment: str) -> str:
     return (
@@ -383,3 +480,29 @@ def _parse_query_value(payload: dict[str, object]) -> float | None:
         raise ValueError("Prometheus sample value must be a string")
 
     return float(sample)
+
+
+def _parse_range_query_samples(payload: dict[str, object]) -> list[dict[str, object]]:
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise ValueError("Prometheus payload missing data")
+
+    result = data.get("result")
+    if not isinstance(result, list):
+        raise ValueError("Prometheus payload missing result list")
+
+    samples: list[dict[str, object]] = []
+    for series in result:
+        if not isinstance(series, dict):
+            continue
+        metric = series.get("metric")
+        values = series.get("values")
+        if not isinstance(metric, dict) or not isinstance(values, list):
+            continue
+        samples.append(
+            {
+                "metric": dict(metric),
+                "values": list(values),
+            }
+        )
+    return samples

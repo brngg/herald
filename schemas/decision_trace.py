@@ -6,6 +6,7 @@ from typing import Any, Literal
 HumanApproval = Literal["approved", "rejected", "n/a"]
 JudgeVerdict = Literal["pass", "fail", "n/a"]
 TraceNodeName = Literal[
+    "observe",
     "fixer",
     "judge",
     "hitl_gate",
@@ -15,6 +16,11 @@ TraceNodeName = Literal[
     "rollout_wait",
     "post_check",
     "rollback",
+    "reason",
+    "critique",
+    "synthesize",
+    "verify",
+    "replan",
     "finalization",
 ]
 FinalState = Literal[
@@ -30,6 +36,7 @@ FinalState = Literal[
 VALID_HUMAN_APPROVALS: tuple[HumanApproval, ...] = ("approved", "rejected", "n/a")
 VALID_JUDGE_VERDICTS: tuple[JudgeVerdict, ...] = ("pass", "fail", "n/a")
 VALID_TRACE_NODE_NAMES: tuple[TraceNodeName, ...] = (
+    "observe",
     "fixer",
     "judge",
     "hitl_gate",
@@ -39,6 +46,11 @@ VALID_TRACE_NODE_NAMES: tuple[TraceNodeName, ...] = (
     "rollout_wait",
     "post_check",
     "rollback",
+    "reason",
+    "critique",
+    "synthesize",
+    "verify",
+    "replan",
     "finalization",
 )
 VALID_FINAL_STATES: tuple[FinalState, ...] = (

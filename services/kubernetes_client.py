@@ -14,6 +14,170 @@ CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 class KubernetesClient:
     runner: CommandRunner | None = None
 
+    def get_resource_json(
+        self,
+        *,
+        namespace: str,
+        kind: str,
+        name: str,
+    ) -> dict[str, Any]:
+        command = [
+            "kubectl",
+            "get",
+            kind,
+            name,
+            "-n",
+            namespace,
+            "-o",
+            "json",
+        ]
+        completed = self._run(command)
+        payload = _parse_json_output(completed.stdout)
+        return {
+            "status": "succeeded" if completed.returncode == 0 else "failed",
+            "namespace": namespace,
+            "kind": kind,
+            "name": name,
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "output": completed.stdout,
+            "resource": payload,
+        }
+
+    def list_pods(
+        self,
+        *,
+        namespace: str,
+        label_selector: str | None = None,
+    ) -> dict[str, Any]:
+        command = [
+            "kubectl",
+            "get",
+            "pods",
+            "-n",
+            namespace,
+            "-o",
+            "json",
+        ]
+        if label_selector:
+            command.extend(["-l", label_selector])
+        completed = self._run(command)
+        payload = _parse_json_output(completed.stdout)
+        return {
+            "status": "succeeded" if completed.returncode == 0 else "failed",
+            "namespace": namespace,
+            "label_selector": label_selector,
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "output": completed.stdout,
+            "resource": payload,
+        }
+
+    def get_events(self, *, namespace: str) -> dict[str, Any]:
+        command = [
+            "kubectl",
+            "get",
+            "events",
+            "-n",
+            namespace,
+            "--sort-by=.lastTimestamp",
+            "-o",
+            "json",
+        ]
+        completed = self._run(command)
+        payload = _parse_json_output(completed.stdout)
+        return {
+            "status": "succeeded" if completed.returncode == 0 else "failed",
+            "namespace": namespace,
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "output": completed.stdout,
+            "resource": payload,
+        }
+
+    def get_pod_logs(
+        self,
+        *,
+        namespace: str,
+        pod: str,
+        container: str | None = None,
+        tail_lines: int = 100,
+    ) -> dict[str, Any]:
+        command = [
+            "kubectl",
+            "logs",
+            pod,
+            "-n",
+            namespace,
+            f"--tail={tail_lines}",
+        ]
+        if container:
+            command.extend(["-c", container])
+        completed = self._run(command)
+        return {
+            "status": "succeeded" if completed.returncode == 0 else "failed",
+            "namespace": namespace,
+            "pod": pod,
+            "container": container,
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "output": completed.stdout,
+        }
+
+    def get_rollout_history(self, *, namespace: str, deployment: str) -> dict[str, Any]:
+        command = [
+            "kubectl",
+            "rollout",
+            "history",
+            f"deployment/{deployment}",
+            "-n",
+            namespace,
+        ]
+        completed = self._run(command)
+        return {
+            "status": "succeeded" if completed.returncode == 0 else "failed",
+            "namespace": namespace,
+            "deployment": deployment,
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "output": completed.stdout,
+        }
+
+    def get_service_endpoints(self, *, namespace: str, service: str) -> dict[str, Any]:
+        command = [
+            "kubectl",
+            "get",
+            "endpoints",
+            service,
+            "-n",
+            namespace,
+            "-o",
+            "json",
+        ]
+        completed = self._run(command)
+        payload = _parse_json_output(completed.stdout)
+        return {
+            "status": "succeeded" if completed.returncode == 0 else "failed",
+            "namespace": namespace,
+            "service": service,
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "output": completed.stdout,
+            "resource": payload,
+        }
+
     def get_deployment_availability(self, *, namespace: str, deployment: str) -> dict[str, Any]:
         command = [
             "kubectl",
@@ -274,3 +438,13 @@ def _as_non_negative_int(value: Any) -> int:
     if isinstance(value, int):
         return max(0, value)
     return 0
+
+
+def _parse_json_output(stdout: str) -> dict[str, Any] | None:
+    if not stdout:
+        return None
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None

@@ -2,24 +2,35 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from agents.fixer import run_fixer_pipeline
+from agents.critic import run_critic_pipeline
 from agents.judge import run_judge_pipeline
+from agents.replanner import run_replanner_pipeline
+from agents.reasoner import run_reasoner_pipeline
+from agents.synthesizer import run_synthesizer_pipeline
 from schemas.decision_trace import DecisionTrace
 from schemas.execution import ExecutionDispatch, ExecutionResult
+from schemas.observations import ObservationBundle, observation_bundle_from_dict
 from schemas.remediation import RemediationAction
+from schemas.verification import VerificationResultV2
 from services.alertmanager_client import incidents_from_alertmanager_payload
+from services.capability_catalog import default_capability_catalog
+from services.cluster_observer import ClusterObserver
+from services.gemini_critic_llm import GeminiCriticLLM
 from services.incident_normalization import normalize_incident_class
 from services.decision_trace_provenance import append_node_run, derive_trace_timeline, initialize_trace_provenance
 from services.execution_worker import ExecutionWorkerClient
 from services.gemini_fixer_llm import GeminiFixerLLM
 from services.gemini_judge_llm import GeminiJudgeLLM
+from services.gemini_reasoner_llm import GeminiReasonerLLM
 from services.kubernetes_client import KubernetesClient
 from services.prometheus_client import PrometheusClient
+from services.verification_engine import build_shadow_verification_plan, run_verification
 from workflows.hitl_gate import (
     HITLDecision,
     finalize_decision_trace,
@@ -28,6 +39,8 @@ from workflows.hitl_gate import (
 )
 
 ROLLOUT_WAIT_TIMEOUT_SECONDS = 60
+EngineMode = Literal["v1", "v2_shadow", "v2_execute"]
+VALID_ENGINE_MODES: tuple[EngineMode, ...] = ("v1", "v2_shadow", "v2_execute")
 
 
 def run_recovery_from_payload(
@@ -35,12 +48,16 @@ def run_recovery_from_payload(
     *,
     approve_action_id: str | None = None,
     reject_action_id: str | None = None,
+    engine_mode: EngineMode | str = "v1",
     fixer_llm: Any = None,
     judge_llm: Any = None,
+    reasoner_llm: Any = None,
+    critic_llm: Any = None,
     kubernetes_client: KubernetesClient | None = None,
     prometheus_client: PrometheusClient | None = None,
     execution_worker_client: ExecutionWorkerClient | None = None,
 ) -> dict[str, Any]:
+    engine_mode = _validate_engine_mode(engine_mode)
     if approve_action_id and reject_action_id:
         raise ValueError("Specify either approve_action_id or reject_action_id, not both.")
 
@@ -49,11 +66,72 @@ def run_recovery_from_payload(
         raise ValueError("Recovery workflow expects exactly one incident per payload.")
 
     incident = incidents[0]
+    observation_bundle: ObservationBundle | None = None
+    observation_run: dict[str, Any] | None = None
+    reasoner_state: dict[str, Any] | None = None
+    reasoner_run: dict[str, Any] | None = None
+    critic_state: dict[str, Any] | None = None
+    critic_run: dict[str, Any] | None = None
+    synthesizer_state: dict[str, Any] | None = None
+    synthesizer_run: dict[str, Any] | None = None
+    verifier_state: dict[str, Any] | None = None
+    replanner_state: dict[str, Any] | None = None
+    if engine_mode != "v1":
+        observation_bundle, observation_run = _collect_observations(
+            incident=incident,
+            kubernetes_client=kubernetes_client,
+            prometheus_client=prometheus_client,
+            engine_mode=engine_mode,
+        )
+        reasoner_state, reasoner_run = _run_shadow_reasoner(
+            incident=incident,
+            observation_bundle=observation_bundle,
+            reasoner_llm=reasoner_llm,
+            engine_mode=engine_mode,
+        )
+        critic_state, critic_run = _run_shadow_critic(
+            incident=incident,
+            observation_bundle=observation_bundle,
+            reasoner_state=reasoner_state,
+            critic_llm=critic_llm,
+            engine_mode=engine_mode,
+        )
+        synthesizer_state, synthesizer_run = _run_shadow_synthesizer(
+            incident=incident,
+            observation_bundle=observation_bundle,
+            reasoner_state=reasoner_state,
+            critic_state=critic_state,
+            engine_mode=engine_mode,
+        )
     fixer_state, judge_state, hitl_decision = _plan_recovery(
         incident=incident,
+        engine_mode=engine_mode,
         fixer_llm=fixer_llm,
         judge_llm=judge_llm,
+        observation_bundle=observation_bundle,
+        observation_run=observation_run,
+        reasoner_state=reasoner_state,
+        reasoner_run=reasoner_run,
+        critic_state=critic_state,
+        critic_run=critic_run,
+        synthesizer_state=synthesizer_state,
+        synthesizer_run=synthesizer_run,
+        verifier_state=verifier_state,
+        replanner_state=replanner_state,
     )
+    fixer_state["_engine_mode"] = engine_mode
+    if observation_bundle is not None:
+        fixer_state["_observation_bundle"] = observation_bundle
+    if reasoner_state is not None:
+        fixer_state["_reasoner_state"] = reasoner_state
+    if critic_state is not None:
+        fixer_state["_critic_state"] = critic_state
+    if synthesizer_state is not None:
+        fixer_state["_synthesizer_state"] = synthesizer_state
+    if verifier_state is not None:
+        fixer_state["_verifier_state"] = verifier_state
+    if replanner_state is not None:
+        fixer_state["_replanner_state"] = replanner_state
     return _continue_recovery(
         incident=incident,
         fixer_state=fixer_state,
@@ -72,8 +150,11 @@ def run_crashloop_recovery_from_payload(
     *,
     approve_action_id: str | None = None,
     reject_action_id: str | None = None,
+    engine_mode: EngineMode | str = "v1",
     fixer_llm: Any = None,
     judge_llm: Any = None,
+    reasoner_llm: Any = None,
+    critic_llm: Any = None,
     kubernetes_client: KubernetesClient | None = None,
     prometheus_client: PrometheusClient | None = None,
     execution_worker_client: ExecutionWorkerClient | None = None,
@@ -82,8 +163,11 @@ def run_crashloop_recovery_from_payload(
         payload,
         approve_action_id=approve_action_id,
         reject_action_id=reject_action_id,
+        engine_mode=engine_mode,
         fixer_llm=fixer_llm,
         judge_llm=judge_llm,
+        reasoner_llm=reasoner_llm,
+        critic_llm=critic_llm,
         kubernetes_client=kubernetes_client,
         prometheus_client=prometheus_client,
         execution_worker_client=execution_worker_client,
@@ -96,10 +180,13 @@ def run_recovery_from_saved_plan(
     *,
     approve_action_id: str | None = None,
     reject_action_id: str | None = None,
+    engine_mode: EngineMode | str = "v1",
+    critic_llm: Any = None,
     kubernetes_client: KubernetesClient | None = None,
     prometheus_client: PrometheusClient | None = None,
     execution_worker_client: ExecutionWorkerClient | None = None,
 ) -> dict[str, Any]:
+    engine_mode = _validate_engine_mode(str(saved_result.get("engine_mode", engine_mode)))
     if approve_action_id and reject_action_id:
         raise ValueError("Specify either approve_action_id or reject_action_id, not both.")
     if approve_action_id is None and reject_action_id is None:
@@ -114,6 +201,15 @@ def run_recovery_from_saved_plan(
     judge_state = _saved_mapping(saved_result.get("judge_state"), field_name="judge_state")
     hitl_decision_payload = _saved_mapping(saved_result.get("hitl_decision"), field_name="hitl_decision")
     decision_trace_payload = _saved_mapping(saved_result.get("decision_trace"), field_name="decision_trace")
+    observation_bundle = _saved_observation_bundle(saved_result.get("observation_bundle"))
+    reasoner_state = _saved_optional_mapping(saved_result.get("reasoner_state"), field_name="reasoner_state")
+    critic_state = _saved_optional_mapping(saved_result.get("critic_state"), field_name="critic_state")
+    synthesizer_state = _saved_optional_mapping(
+        saved_result.get("synthesizer_state"),
+        field_name="synthesizer_state",
+    )
+    verifier_state = _saved_optional_mapping(saved_result.get("verifier_state"), field_name="verifier_state")
+    replanner_state = _saved_optional_mapping(saved_result.get("replanner_state"), field_name="replanner_state")
 
     hitl_decision = HITLDecision(
         routing_decision=str(hitl_decision_payload["routing_decision"]),
@@ -125,6 +221,19 @@ def run_recovery_from_saved_plan(
         ],
         decision_trace=_decision_trace_from_saved(decision_trace_payload),
     )
+    fixer_state["_engine_mode"] = engine_mode
+    if observation_bundle is not None:
+        fixer_state["_observation_bundle"] = observation_bundle
+    if reasoner_state is not None:
+        fixer_state["_reasoner_state"] = reasoner_state
+    if critic_state is not None:
+        fixer_state["_critic_state"] = critic_state
+    if synthesizer_state is not None:
+        fixer_state["_synthesizer_state"] = synthesizer_state
+    if verifier_state is not None:
+        fixer_state["_verifier_state"] = verifier_state
+    if replanner_state is not None:
+        fixer_state["_replanner_state"] = replanner_state
     return _continue_recovery(
         incident=incident,
         fixer_state=fixer_state,
@@ -144,6 +253,8 @@ def run_crashloop_recovery_from_saved_plan(
     *,
     approve_action_id: str | None = None,
     reject_action_id: str | None = None,
+    engine_mode: EngineMode | str = "v1",
+    critic_llm: Any = None,
     kubernetes_client: KubernetesClient | None = None,
     prometheus_client: PrometheusClient | None = None,
     execution_worker_client: ExecutionWorkerClient | None = None,
@@ -153,6 +264,8 @@ def run_crashloop_recovery_from_saved_plan(
         saved_result,
         approve_action_id=approve_action_id,
         reject_action_id=reject_action_id,
+        engine_mode=engine_mode,
+        critic_llm=critic_llm,
         kubernetes_client=kubernetes_client,
         prometheus_client=prometheus_client,
         execution_worker_client=execution_worker_client,
@@ -162,8 +275,19 @@ def run_crashloop_recovery_from_saved_plan(
 def _plan_recovery(
     *,
     incident: Any,
+    engine_mode: EngineMode,
     fixer_llm: Any = None,
     judge_llm: Any = None,
+    observation_bundle: ObservationBundle | None = None,
+    observation_run: dict[str, Any] | None = None,
+    reasoner_state: dict[str, Any] | None = None,
+    reasoner_run: dict[str, Any] | None = None,
+    critic_state: dict[str, Any] | None = None,
+    critic_run: dict[str, Any] | None = None,
+    synthesizer_state: dict[str, Any] | None = None,
+    synthesizer_run: dict[str, Any] | None = None,
+    verifier_state: dict[str, Any] | None = None,
+    replanner_state: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], HITLDecision]:
     fixer_state = run_fixer_pipeline(incident, llm=fixer_llm)
     judge_state = run_judge_pipeline(
@@ -181,7 +305,64 @@ def _plan_recovery(
         judge_verdict=judge_state["judge_verdict"],
         judge_reason=judge_state["judge_reason"],
     )
-    trace = initialize_trace_provenance(hitl_decision.decision_trace)
+    trace = hitl_decision.decision_trace
+    if engine_mode != "v1":
+        trace = _attach_v2_shadow_fixer_plan(
+            trace,
+            incident=incident,
+            engine_mode=engine_mode,
+            observation_bundle=observation_bundle,
+            observation_run=observation_run,
+            reasoner_state=reasoner_state,
+            critic_state=critic_state,
+            synthesizer_state=synthesizer_state,
+            verifier_state=verifier_state,
+            replanner_state=replanner_state,
+        )
+    trace = initialize_trace_provenance(trace)
+    if observation_run is not None:
+        trace = append_node_run(
+            trace,
+            node_name="observe",
+            status=str(observation_run["status"]),
+            summary=str(observation_run["summary"]),
+            input_summary=dict(observation_run["input_summary"]),
+            output_summary=dict(observation_run["output_summary"]),
+            artifact_refs=list(observation_run.get("artifact_refs", [])),
+        )
+    if reasoner_run is not None:
+        trace = append_node_run(
+            trace,
+            node_name="reason",
+            status=str(reasoner_run["status"]),
+            summary=str(reasoner_run["summary"]),
+            llm_explanation=_truncate_text(reasoner_state.get("raw_reasoner_output")) if reasoner_state else None,
+            input_summary=dict(reasoner_run["input_summary"]),
+            output_summary=dict(reasoner_run["output_summary"]),
+            artifact_refs=list(reasoner_run.get("artifact_refs", [])),
+        )
+    if critic_run is not None:
+        trace = append_node_run(
+            trace,
+            node_name="critique",
+            status=str(critic_run["status"]),
+            summary=str(critic_run["summary"]),
+            llm_explanation=_truncate_text(critic_state.get("raw_critic_output")) if critic_state else None,
+            input_summary=dict(critic_run["input_summary"]),
+            output_summary=dict(critic_run["output_summary"]),
+            artifact_refs=list(critic_run.get("artifact_refs", [])),
+        )
+    if synthesizer_run is not None:
+        trace = append_node_run(
+            trace,
+            node_name="synthesize",
+            status=str(synthesizer_run["status"]),
+            summary=str(synthesizer_run["summary"]),
+            llm_explanation=_truncate_text((synthesizer_state or {}).get("failure_reason")),
+            input_summary=dict(synthesizer_run["input_summary"]),
+            output_summary=dict(synthesizer_run["output_summary"]),
+            artifact_refs=list(synthesizer_run.get("artifact_refs", [])),
+        )
     trace = append_node_run(
         trace,
         node_name="fixer",
@@ -317,6 +498,16 @@ def _continue_crashloop_recovery(
     prometheus_client: PrometheusClient | None = None,
     execution_worker_client: ExecutionWorkerClient | None = None,
 ) -> dict[str, Any]:
+    shadow_context = _build_shadow_followup_context(
+        incident=incident,
+        fixer_state=fixer_state,
+        hitl_decision=hitl_decision,
+        kubernetes_client=kubernetes_client,
+        prometheus_client=prometheus_client,
+    )
+
+    def append_finalization(trace: DecisionTrace) -> DecisionTrace:
+        return _append_finalization_run(trace, shadow_context=shadow_context)
 
     if approve_action_id is None and reject_action_id is None:
         decision_trace = hitl_decision.decision_trace
@@ -333,7 +524,7 @@ def _continue_crashloop_recovery(
                 },
                 final_state="escalated",
             )
-            decision_trace = _append_finalization_run(decision_trace)
+            decision_trace = append_finalization(decision_trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -355,7 +546,7 @@ def _continue_crashloop_recovery(
             },
             final_state="escalated",
         )
-        trace = _append_finalization_run(trace)
+        trace = append_finalization(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -399,7 +590,7 @@ def _continue_crashloop_recovery(
             },
             final_state="rejected",
         )
-        trace = _append_finalization_run(trace)
+        trace = append_finalization(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -447,7 +638,7 @@ def _continue_crashloop_recovery(
             verification_result=verification_result,
             final_state=final_state,
         )
-        trace = _append_finalization_run(trace)
+        trace = append_finalization(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -494,7 +685,7 @@ def _continue_crashloop_recovery(
             verification_result=verification_result,
             final_state="recovered",
         )
-        trace = _append_finalization_run(trace)
+        trace = append_finalization(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -546,7 +737,7 @@ def _continue_crashloop_recovery(
             },
             final_state="escalated",
         )
-        trace = _append_finalization_run(trace)
+        trace = append_finalization(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -641,7 +832,7 @@ def _continue_crashloop_recovery(
         final_state=final_state,
         rollback_triggered=rollback_triggered,
     )
-    trace = _append_finalization_run(trace)
+    trace = append_finalization(trace)
     return _build_result(
         incident=incident,
         fixer_state=fixer_state,
@@ -663,6 +854,17 @@ def _continue_bad_config_recovery(
     prometheus_client: PrometheusClient | None = None,
     execution_worker_client: ExecutionWorkerClient | None = None,
 ) -> dict[str, Any]:
+    shadow_context = _build_shadow_followup_context(
+        incident=incident,
+        fixer_state=fixer_state,
+        hitl_decision=hitl_decision,
+        kubernetes_client=kubernetes_client,
+        prometheus_client=prometheus_client,
+    )
+
+    def append_finalization(trace: DecisionTrace) -> DecisionTrace:
+        return _append_finalization_run(trace, shadow_context=shadow_context)
+
     if approve_action_id is None and reject_action_id is None:
         decision_trace = hitl_decision.decision_trace
         if hitl_decision.routing_decision == "halt":
@@ -678,7 +880,7 @@ def _continue_bad_config_recovery(
                 },
                 final_state="escalated",
             )
-            decision_trace = _append_finalization_run(decision_trace)
+            decision_trace = append_finalization(decision_trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -700,7 +902,7 @@ def _continue_bad_config_recovery(
             },
             final_state="escalated",
         )
-        trace = _append_finalization_run(trace)
+        trace = append_finalization(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -744,7 +946,7 @@ def _continue_bad_config_recovery(
             },
             final_state="rejected",
         )
-        trace = _append_finalization_run(trace)
+        trace = append_finalization(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -792,7 +994,7 @@ def _continue_bad_config_recovery(
             verification_result=verification_result,
             final_state=final_state,
         )
-        trace = _append_finalization_run(trace)
+        trace = append_finalization(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -845,7 +1047,7 @@ def _continue_bad_config_recovery(
             verification_result=verification_result,
             final_state=final_state,
         )
-        trace = _append_finalization_run(trace)
+        trace = append_finalization(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -897,7 +1099,7 @@ def _continue_bad_config_recovery(
             },
             final_state="escalated",
         )
-        trace = _append_finalization_run(trace)
+        trace = append_finalization(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -957,7 +1159,7 @@ def _continue_bad_config_recovery(
         final_state=final_state,
         rollback_triggered=False,
     )
-    trace = _append_finalization_run(trace)
+    trace = append_finalization(trace)
     return _build_result(
         incident=incident,
         fixer_state=fixer_state,
@@ -979,6 +1181,17 @@ def _continue_cpu_saturation_recovery(
     prometheus_client: PrometheusClient | None = None,
     execution_worker_client: ExecutionWorkerClient | None = None,
 ) -> dict[str, Any]:
+    shadow_context = _build_shadow_followup_context(
+        incident=incident,
+        fixer_state=fixer_state,
+        hitl_decision=hitl_decision,
+        kubernetes_client=kubernetes_client,
+        prometheus_client=prometheus_client,
+    )
+
+    def append_finalization(trace: DecisionTrace) -> DecisionTrace:
+        return _append_finalization_run(trace, shadow_context=shadow_context)
+
     if approve_action_id is None and reject_action_id is None:
         decision_trace = hitl_decision.decision_trace
         if hitl_decision.routing_decision == "halt":
@@ -994,7 +1207,7 @@ def _continue_cpu_saturation_recovery(
                 },
                 final_state="escalated",
             )
-            decision_trace = _append_finalization_run(decision_trace)
+            decision_trace = append_finalization(decision_trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -1016,7 +1229,7 @@ def _continue_cpu_saturation_recovery(
             },
             final_state="escalated",
         )
-        trace = _append_finalization_run(trace)
+        trace = append_finalization(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -1060,7 +1273,7 @@ def _continue_cpu_saturation_recovery(
             },
             final_state="rejected",
         )
-        trace = _append_finalization_run(trace)
+        trace = append_finalization(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -1108,7 +1321,7 @@ def _continue_cpu_saturation_recovery(
             verification_result=verification_result,
             final_state=final_state,
         )
-        trace = _append_finalization_run(trace)
+        trace = append_finalization(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -1156,7 +1369,7 @@ def _continue_cpu_saturation_recovery(
             verification_result=verification_result,
             final_state="recovered",
         )
-        trace = _append_finalization_run(trace)
+        trace = append_finalization(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -1208,7 +1421,7 @@ def _continue_cpu_saturation_recovery(
             },
             final_state="escalated",
         )
-        trace = _append_finalization_run(trace)
+        trace = append_finalization(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -1245,7 +1458,7 @@ def _continue_cpu_saturation_recovery(
         verification_result=verification_result,
         final_state=final_state,
     )
-    trace = _append_finalization_run(trace)
+    trace = append_finalization(trace)
     return _build_result(
         incident=incident,
         fixer_state=fixer_state,
@@ -1267,6 +1480,17 @@ def _continue_network_partition_recovery(
     prometheus_client: PrometheusClient | None = None,
     execution_worker_client: ExecutionWorkerClient | None = None,
 ) -> dict[str, Any]:
+    shadow_context = _build_shadow_followup_context(
+        incident=incident,
+        fixer_state=fixer_state,
+        hitl_decision=hitl_decision,
+        kubernetes_client=kubernetes_client,
+        prometheus_client=prometheus_client,
+    )
+
+    def append_finalization(trace: DecisionTrace) -> DecisionTrace:
+        return _append_finalization_run(trace, shadow_context=shadow_context)
+
     if approve_action_id is None and reject_action_id is None:
         decision_trace = hitl_decision.decision_trace
         if hitl_decision.routing_decision == "halt":
@@ -1282,7 +1506,7 @@ def _continue_network_partition_recovery(
                 },
                 final_state="escalated",
             )
-            decision_trace = _append_finalization_run(decision_trace)
+            decision_trace = append_finalization(decision_trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -1304,7 +1528,7 @@ def _continue_network_partition_recovery(
             },
             final_state="escalated",
         )
-        trace = _append_finalization_run(trace)
+        trace = append_finalization(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -1348,7 +1572,7 @@ def _continue_network_partition_recovery(
             },
             final_state="rejected",
         )
-        trace = _append_finalization_run(trace)
+        trace = append_finalization(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -1396,7 +1620,7 @@ def _continue_network_partition_recovery(
             verification_result=verification_result,
             final_state=final_state,
         )
-        trace = _append_finalization_run(trace)
+        trace = append_finalization(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -1450,7 +1674,7 @@ def _continue_network_partition_recovery(
             verification_result=verification_result,
             final_state=final_state,
         )
-        trace = _append_finalization_run(trace)
+        trace = append_finalization(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -1502,7 +1726,7 @@ def _continue_network_partition_recovery(
             },
             final_state="escalated",
         )
-        trace = _append_finalization_run(trace)
+        trace = append_finalization(trace)
         return _build_result(
             incident=incident,
             fixer_state=fixer_state,
@@ -1543,7 +1767,7 @@ def _continue_network_partition_recovery(
         verification_result=verification_result,
         final_state=final_state,
     )
-    trace = _append_finalization_run(trace)
+    trace = append_finalization(trace)
     return _build_result(
         incident=incident,
         fixer_state=fixer_state,
@@ -1611,8 +1835,21 @@ def _build_result(
     hitl_decision: HITLDecision,
     decision_trace: DecisionTrace,
 ) -> dict[str, Any]:
+    observation_bundle = fixer_state.get("_observation_bundle")
+    reasoner_state = fixer_state.get("_reasoner_state")
+    critic_state = fixer_state.get("_critic_state")
+    synthesizer_state = fixer_state.get("_synthesizer_state")
+    verifier_state = fixer_state.get("_verifier_state")
+    replanner_state = fixer_state.get("_replanner_state")
     return {
         "incident": incident,
+        "engine_mode": str(fixer_state.get("_engine_mode", "v1")),
+        "observation_bundle": observation_bundle,
+        "reasoner_state": reasoner_state,
+        "critic_state": critic_state,
+        "synthesizer_state": synthesizer_state,
+        "verifier_state": verifier_state,
+        "replanner_state": replanner_state,
         "fixer_state": fixer_state,
         "judge_state": judge_state,
         "hitl_decision": {
@@ -1627,6 +1864,26 @@ def _build_result(
 
 
 def _saved_mapping(value: Any, *, field_name: str) -> dict[str, Any]:
+    if is_dataclass(value):
+        value = asdict(value)
+    if not isinstance(value, dict):
+        raise TypeError(f"saved {field_name} must be an object")
+    return value
+
+
+def _saved_observation_bundle(value: Any) -> ObservationBundle | None:
+    if value is None:
+        return None
+    if is_dataclass(value):
+        value = asdict(value)
+    if not isinstance(value, dict):
+        raise TypeError("saved observation_bundle must be an object")
+    return observation_bundle_from_dict(value)
+
+
+def _saved_optional_mapping(value: Any, *, field_name: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
     if is_dataclass(value):
         value = asdict(value)
     if not isinstance(value, dict):
@@ -1677,6 +1934,454 @@ def _to_jsonable(value: Any) -> Any:
     if isinstance(value, list):
         return [_to_jsonable(item) for item in value]
     return value
+
+
+def _validate_engine_mode(value: str) -> EngineMode:
+    if value not in VALID_ENGINE_MODES:
+        raise ValueError(f"Unsupported engine_mode: {value!r}")
+    return value
+
+
+def _collect_observations(
+    *,
+    incident: Any,
+    kubernetes_client: KubernetesClient | None,
+    prometheus_client: PrometheusClient | None,
+    engine_mode: EngineMode,
+) -> tuple[ObservationBundle | None, dict[str, Any]]:
+    observer = ClusterObserver(
+        kubernetes_client=kubernetes_client,
+        prometheus_client=prometheus_client,
+    )
+    try:
+        observation_bundle = observer.collect(incident=incident)
+    except Exception as exc:
+        return None, {
+            "status": "failed",
+            "summary": f"Observation step failed in {engine_mode} and HERALD continued on the bounded v1 path.",
+            "input_summary": {
+                "incident_id": incident.incident_id,
+                "incident_class": incident.incident_class,
+                "engine_mode": engine_mode,
+            },
+            "output_summary": {
+                "error": str(exc),
+            },
+        }
+
+    return observation_bundle, {
+        "status": "succeeded",
+        "summary": f"Observation step collected live cluster context for {engine_mode} handoff.",
+        "input_summary": {
+            "incident_id": incident.incident_id,
+            "incident_class": incident.incident_class,
+            "engine_mode": engine_mode,
+        },
+        "output_summary": {
+            "namespace_hint": observation_bundle.namespace_hint,
+            "incident_class_hint": observation_bundle.incident_class_hint,
+            "kubernetes_sections": sorted(observation_bundle.kubernetes.keys()),
+            "prometheus_sections": sorted(observation_bundle.prometheus.keys()),
+            "error_count": len(observation_bundle.errors),
+        },
+    }
+
+
+def _run_shadow_reasoner(
+    *,
+    incident: Any,
+    observation_bundle: ObservationBundle | None,
+    reasoner_llm: Any,
+    engine_mode: EngineMode,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if observation_bundle is None:
+        failure_reason = "Observation bundle unavailable; skipped shadow reasoning."
+        return {
+            "incident_summary": "",
+            "incident_class_hint": normalize_incident_class(str(incident.incident_class)),
+            "reasoner_output": None,
+            "mapped_v1_candidates": [],
+            "errors": [failure_reason],
+            "final": True,
+            "status": "failed",
+            "failure_reason": failure_reason,
+        }, {
+            "status": "failed",
+            "summary": f"Reasoner skipped in {engine_mode} because observation data was unavailable.",
+            "input_summary": {
+                "incident_id": incident.incident_id,
+                "incident_class": incident.incident_class,
+                "engine_mode": engine_mode,
+            },
+            "output_summary": {
+                "intent_count": 0,
+                "mapped_candidate_count": 0,
+                "error_count": 1,
+                "failure_reason": failure_reason,
+            },
+        }
+
+    try:
+        reasoner_state = run_reasoner_pipeline(
+            incident,
+            observation_bundle,
+            llm=reasoner_llm,
+            capability_catalog=default_capability_catalog(),
+        )
+    except Exception as exc:
+        failure_reason = f"Reasoner pipeline failed unexpectedly: {exc}"
+        reasoner_state = {
+            "incident_summary": "",
+            "incident_class_hint": observation_bundle.incident_class_hint,
+            "reasoner_output": None,
+            "mapped_v1_candidates": [],
+            "errors": [failure_reason],
+            "final": True,
+            "status": "failed",
+            "failure_reason": failure_reason,
+        }
+
+    reasoner_output = reasoner_state.get("reasoner_output")
+    intent_count = len(reasoner_output.intents) if reasoner_output is not None else 0
+    mapped_candidates = reasoner_state.get("mapped_v1_candidates", [])
+    if reasoner_state.get("status") == "failed":
+        summary = f"Reasoner failed in {engine_mode} and HERALD continued on the bounded v1 path."
+    else:
+        summary = f"Reasoner emitted shadow intents for {engine_mode} handoff."
+
+    output_summary = {
+        "intent_count": intent_count,
+        "mapped_candidate_count": len(mapped_candidates),
+        "error_count": len(reasoner_state.get("errors", [])),
+    }
+    if reasoner_state.get("failure_reason"):
+        output_summary["failure_reason"] = reasoner_state["failure_reason"]
+
+    return reasoner_state, {
+        "status": reasoner_state.get("status", "failed"),
+        "summary": summary,
+        "input_summary": {
+            "incident_id": incident.incident_id,
+            "incident_class": incident.incident_class,
+            "engine_mode": engine_mode,
+        },
+        "output_summary": output_summary,
+    }
+
+
+def _run_shadow_critic(
+    *,
+    incident: Any,
+    observation_bundle: ObservationBundle | None,
+    reasoner_state: dict[str, Any] | None,
+    critic_llm: Any,
+    engine_mode: EngineMode,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    reasoner_output = (reasoner_state or {}).get("reasoner_output")
+    if observation_bundle is None or reasoner_output is None:
+        failure_reason = "Reasoner output unavailable; skipped shadow critique."
+        return {
+            "incident_summary": "",
+            "critic_output": None,
+            "policy_summary": {},
+            "errors": [failure_reason],
+            "final": True,
+            "status": "failed",
+            "failure_reason": failure_reason,
+        }, {
+            "status": "failed",
+            "summary": f"Critic skipped in {engine_mode} because reasoner output was unavailable.",
+            "input_summary": {
+                "incident_id": incident.incident_id,
+                "incident_class": incident.incident_class,
+                "engine_mode": engine_mode,
+            },
+            "output_summary": {
+                "candidate_count": 0,
+                "approved_candidate_count": 0,
+                "escalation_recommended": False,
+                "error_count": 1,
+                "failure_reason": failure_reason,
+            },
+        }
+
+    try:
+        critic_state = run_critic_pipeline(
+            incident,
+            observation_bundle,
+            reasoner_output,
+            llm=critic_llm,
+            capability_catalog=default_capability_catalog(),
+        )
+    except Exception as exc:
+        failure_reason = f"Critic pipeline failed unexpectedly: {exc}"
+        critic_state = {
+            "incident_summary": "",
+            "critic_output": None,
+            "policy_summary": {},
+            "errors": [failure_reason],
+            "final": True,
+            "status": "failed",
+            "failure_reason": failure_reason,
+        }
+
+    critic_output = critic_state.get("critic_output")
+    policy_summary = dict(critic_state.get("policy_summary", {}))
+    if critic_state.get("status") == "failed":
+        summary = f"Critic failed in {engine_mode} and HERALD continued on the bounded v1 path."
+    else:
+        summary = f"Critic emitted shadow policy analysis for {engine_mode} handoff."
+
+    output_summary = {
+        "candidate_count": len(critic_output.candidates) if critic_output is not None else 0,
+        "approved_candidate_count": int(policy_summary.get("approved_candidate_count", 0)),
+        "escalation_recommended": bool(policy_summary.get("escalation_recommended", False)),
+        "error_count": len(critic_state.get("errors", [])),
+    }
+    if critic_state.get("failure_reason"):
+        output_summary["failure_reason"] = critic_state["failure_reason"]
+
+    return critic_state, {
+        "status": critic_state.get("status", "failed"),
+        "summary": summary,
+        "input_summary": {
+            "incident_id": incident.incident_id,
+            "incident_class": incident.incident_class,
+            "engine_mode": engine_mode,
+        },
+        "output_summary": output_summary,
+    }
+
+
+def _run_shadow_synthesizer(
+    *,
+    incident: Any,
+    observation_bundle: ObservationBundle | None,
+    reasoner_state: dict[str, Any] | None,
+    critic_state: dict[str, Any] | None,
+    engine_mode: EngineMode,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    reasoner_output = (reasoner_state or {}).get("reasoner_output")
+    critic_output = (critic_state or {}).get("critic_output")
+    if observation_bundle is None or reasoner_output is None:
+        failure_reason = "Reasoner output unavailable; skipped shadow synthesis."
+        return {
+            "incident_summary": "",
+            "synthesis_output": None,
+            "synthesized_v1_dispatches": [],
+            "errors": [failure_reason],
+            "final": True,
+            "status": "failed",
+            "failure_reason": failure_reason,
+        }, {
+            "status": "failed",
+            "summary": f"Synthesizer skipped in {engine_mode} because reasoner output was unavailable.",
+            "input_summary": {
+                "incident_id": incident.incident_id,
+                "incident_class": incident.incident_class,
+                "engine_mode": engine_mode,
+            },
+            "output_summary": {
+                "plan_count": 0,
+                "dispatch_count": 0,
+                "unsupported_intent_count": 0,
+                "warning_count": 1,
+                "failure_reason": failure_reason,
+            },
+        }
+
+    try:
+        synthesizer_state = run_synthesizer_pipeline(
+            incident,
+            observation_bundle,
+            reasoner_output,
+            critic_output,
+        )
+    except Exception as exc:
+        failure_reason = f"Synthesizer pipeline failed unexpectedly: {exc}"
+        synthesizer_state = {
+            "incident_summary": "",
+            "synthesis_output": None,
+            "synthesized_v1_dispatches": [],
+            "errors": [failure_reason],
+            "final": True,
+            "status": "failed",
+            "failure_reason": failure_reason,
+        }
+
+    synthesis_output = synthesizer_state.get("synthesis_output")
+    synthesized_v1_dispatches = list(synthesizer_state.get("synthesized_v1_dispatches", []))
+    if synthesizer_state.get("status") == "failed":
+        summary = f"Synthesizer failed in {engine_mode} and HERALD continued on the bounded v1 path."
+    else:
+        summary = f"Synthesizer emitted bounded shadow execution plans for {engine_mode} handoff."
+
+    output_summary = {
+        "plan_count": len(synthesis_output.plans) if synthesis_output is not None else 0,
+        "dispatch_count": len(synthesized_v1_dispatches),
+        "unsupported_intent_count": len(synthesis_output.unsupported_intents) if synthesis_output is not None else 0,
+        "warning_count": len(synthesis_output.warnings) if synthesis_output is not None else 0,
+        "error_count": len(synthesizer_state.get("errors", [])),
+    }
+    if synthesizer_state.get("failure_reason"):
+        output_summary["failure_reason"] = synthesizer_state["failure_reason"]
+
+    return synthesizer_state, {
+        "status": synthesizer_state.get("status", "failed"),
+        "summary": summary,
+        "input_summary": {
+            "incident_id": incident.incident_id,
+            "incident_class": incident.incident_class,
+            "engine_mode": engine_mode,
+        },
+        "output_summary": output_summary,
+    }
+
+
+def _attach_v2_shadow_fixer_plan(
+    trace: DecisionTrace,
+    *,
+    incident: Any,
+    engine_mode: EngineMode,
+    observation_bundle: ObservationBundle | None,
+    observation_run: dict[str, Any] | None,
+    reasoner_state: dict[str, Any] | None,
+    critic_state: dict[str, Any] | None,
+    synthesizer_state: dict[str, Any] | None,
+    verifier_state: dict[str, Any] | None,
+    replanner_state: dict[str, Any] | None,
+) -> DecisionTrace:
+    fixer_plan = dict(trace.fixer_plan)
+    fixer_plan["v2_shadow"] = _build_v2_shadow_payload(
+        incident=incident,
+        engine_mode=engine_mode,
+        observation_bundle=observation_bundle,
+        observation_run=observation_run,
+        reasoner_state=reasoner_state,
+        critic_state=critic_state,
+        synthesizer_state=synthesizer_state,
+        verifier_state=verifier_state,
+        replanner_state=replanner_state,
+    )
+    return replace(trace, fixer_plan=fixer_plan)
+
+
+def _build_v2_shadow_payload(
+    *,
+    incident: Any,
+    engine_mode: EngineMode,
+    observation_bundle: ObservationBundle | None,
+    observation_run: dict[str, Any] | None,
+    reasoner_state: dict[str, Any] | None,
+    critic_state: dict[str, Any] | None,
+    synthesizer_state: dict[str, Any] | None,
+    verifier_state: dict[str, Any] | None,
+    replanner_state: dict[str, Any] | None,
+) -> dict[str, Any]:
+    reasoner_status = str((reasoner_state or {}).get("status", "failed"))
+    critic_status = str((critic_state or {}).get("status", "failed"))
+    synthesis_status = str((synthesizer_state or {}).get("status", "failed"))
+    verification_status = str((verifier_state or {}).get("verification_status", "not_run"))
+    replanner_status = str((replanner_state or {}).get("status", "not_run"))
+    overall_status = (
+        "succeeded"
+        if reasoner_status == "succeeded"
+        and critic_status == "succeeded"
+        and synthesis_status == "succeeded"
+        and verification_status in {"passed", "unrecovered", "not_run"}
+        and replanner_status in {"succeeded", "not_run"}
+        else "failed"
+    )
+    payload = {
+        "engine_mode": engine_mode,
+        "status": overall_status,
+        "reasoner_status": reasoner_status,
+        "critic_status": critic_status,
+        "synthesis_status": synthesis_status,
+        "verification_status": verification_status,
+        "replanner_status": replanner_status,
+        "observation_summary": _shadow_observation_summary(
+            incident=incident,
+            observation_bundle=observation_bundle,
+            observation_run=observation_run,
+        ),
+        "reasoner_output": _to_jsonable((reasoner_state or {}).get("reasoner_output")),
+        "mapped_v1_candidates": [
+            _serialize_remediation_action(action)
+            for action in list((reasoner_state or {}).get("mapped_v1_candidates", []))
+            if isinstance(action, RemediationAction)
+        ],
+        "critic_output": _to_jsonable((critic_state or {}).get("critic_output")),
+        "policy_summary": _to_jsonable((critic_state or {}).get("policy_summary", {})),
+        "synthesis_output": _to_jsonable((synthesizer_state or {}).get("synthesis_output")),
+        "synthesized_v1_dispatches": _to_jsonable(list((synthesizer_state or {}).get("synthesized_v1_dispatches", []))),
+        "verification_plan": _to_jsonable((verifier_state or {}).get("verification_plan")),
+        "verification_result_v2": _to_jsonable((verifier_state or {}).get("verification_result_v2")),
+        "replan_output": _to_jsonable((replanner_state or {}).get("replan_output")),
+    }
+    failure_reason = (reasoner_state or {}).get("failure_reason")
+    if isinstance(failure_reason, str) and failure_reason:
+        payload["failure_reason"] = failure_reason
+    critic_failure_reason = (critic_state or {}).get("failure_reason")
+    if isinstance(critic_failure_reason, str) and critic_failure_reason:
+        payload["critic_failure_reason"] = critic_failure_reason
+    synthesis_failure_reason = (synthesizer_state or {}).get("failure_reason")
+    if isinstance(synthesis_failure_reason, str) and synthesis_failure_reason:
+        payload["synthesis_failure_reason"] = synthesis_failure_reason
+    verification_failure_reason = (
+        (verifier_state or {}).get("verification_failure_reason")
+        or (verifier_state or {}).get("failure_reason")
+    )
+    if isinstance(verification_failure_reason, str) and verification_failure_reason:
+        payload["verification_failure_reason"] = verification_failure_reason
+    replan_failure_reason = (
+        (replanner_state or {}).get("replan_failure_reason")
+        or (replanner_state or {}).get("failure_reason")
+    )
+    if isinstance(replan_failure_reason, str) and replan_failure_reason:
+        payload["replan_failure_reason"] = replan_failure_reason
+    return payload
+
+
+def _shadow_observation_summary(
+    *,
+    incident: Any,
+    observation_bundle: ObservationBundle | None,
+    observation_run: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if observation_bundle is not None:
+        return {
+            "incident_id": observation_bundle.incident_id,
+            "incident_class_hint": observation_bundle.incident_class_hint,
+            "namespace_hint": observation_bundle.namespace_hint,
+            "kubernetes_sections": sorted(observation_bundle.kubernetes.keys()),
+            "prometheus_sections": sorted(observation_bundle.prometheus.keys()),
+            "error_count": len(observation_bundle.errors),
+        }
+
+    output_summary = dict((observation_run or {}).get("output_summary", {}))
+    return {
+        "incident_id": incident.incident_id,
+        "incident_class_hint": str(
+            output_summary.get("incident_class_hint") or normalize_incident_class(str(incident.incident_class))
+        ),
+        "namespace_hint": output_summary.get("namespace_hint"),
+        "kubernetes_sections": list(output_summary.get("kubernetes_sections", [])),
+        "prometheus_sections": list(output_summary.get("prometheus_sections", [])),
+        "error_count": int(output_summary.get("error_count", 1 if observation_run else 0)),
+    }
+
+
+def _serialize_remediation_action(action: RemediationAction) -> dict[str, Any]:
+    return {
+        "action_id": action.action_id,
+        "action_type": action.action_type,
+        "description": action.description,
+        "confidence_score": action.confidence_score,
+        "blast_radius_score": action.blast_radius_score,
+        "requires_approval": action.requires_approval,
+        "parameters": dict(action.parameters),
+    }
 
 
 def _utc_now() -> str:
@@ -1879,7 +2584,12 @@ def _append_rollback_run(
     )
 
 
-def _append_finalization_run(trace: DecisionTrace) -> DecisionTrace:
+def _append_finalization_run(
+    trace: DecisionTrace,
+    *,
+    shadow_context: dict[str, Any] | None = None,
+) -> DecisionTrace:
+    trace = _append_shadow_followup_runs(trace, shadow_context=shadow_context)
     return append_node_run(
         trace,
         node_name="finalization",
@@ -1894,6 +2604,350 @@ def _append_finalization_run(trace: DecisionTrace) -> DecisionTrace:
             "rollback_triggered": trace.rollback_triggered,
         },
     )
+
+
+def _build_shadow_followup_context(
+    *,
+    incident: Any,
+    fixer_state: dict[str, Any],
+    hitl_decision: HITLDecision,
+    kubernetes_client: KubernetesClient | None,
+    prometheus_client: PrometheusClient | None,
+) -> dict[str, Any] | None:
+    if str(fixer_state.get("_engine_mode", "v1")) != "v2_shadow":
+        return None
+    return {
+        "incident": incident,
+        "fixer_state": fixer_state,
+        "hitl_decision": hitl_decision,
+        "engine_mode": str(fixer_state.get("_engine_mode", "v2_shadow")),
+        "kubernetes_client": kubernetes_client,
+        "prometheus_client": prometheus_client,
+    }
+
+
+def _append_shadow_followup_runs(
+    trace: DecisionTrace,
+    *,
+    shadow_context: dict[str, Any] | None,
+) -> DecisionTrace:
+    if shadow_context is None:
+        return trace
+
+    verifier_state, verify_run = _run_shadow_verifier(
+        trace=trace,
+        incident=shadow_context["incident"],
+        fixer_state=shadow_context["fixer_state"],
+        hitl_decision=shadow_context["hitl_decision"],
+        prometheus_client=shadow_context.get("prometheus_client"),
+        kubernetes_client=shadow_context.get("kubernetes_client"),
+    )
+    shadow_context["fixer_state"]["_verifier_state"] = verifier_state
+    trace = append_node_run(
+        trace,
+        node_name="verify",
+        status=str(verify_run["status"]),
+        summary=str(verify_run["summary"]),
+        input_summary=dict(verify_run["input_summary"]),
+        output_summary=dict(verify_run["output_summary"]),
+        artifact_refs=list(verify_run.get("artifact_refs", [])),
+    )
+    replanner_state, replan_run = _run_shadow_replanner(
+        trace=trace,
+        incident=shadow_context["incident"],
+        fixer_state=shadow_context["fixer_state"],
+        hitl_decision=shadow_context["hitl_decision"],
+    )
+    shadow_context["fixer_state"]["_replanner_state"] = replanner_state
+    trace = _attach_v2_shadow_fixer_plan(
+        trace,
+        incident=shadow_context["incident"],
+        engine_mode=str(shadow_context.get("engine_mode", "v2_shadow")),
+        observation_bundle=shadow_context["fixer_state"].get("_observation_bundle"),
+        observation_run=None,
+        reasoner_state=shadow_context["fixer_state"].get("_reasoner_state"),
+        critic_state=shadow_context["fixer_state"].get("_critic_state"),
+        synthesizer_state=shadow_context["fixer_state"].get("_synthesizer_state"),
+        verifier_state=verifier_state,
+        replanner_state=replanner_state,
+    )
+    if replan_run is not None:
+        trace = append_node_run(
+            trace,
+            node_name="replan",
+            status=str(replan_run["status"]),
+            summary=str(replan_run["summary"]),
+            input_summary=dict(replan_run["input_summary"]),
+            output_summary=dict(replan_run["output_summary"]),
+            artifact_refs=list(replan_run.get("artifact_refs", [])),
+        )
+    return trace
+
+
+def _run_shadow_verifier(
+    *,
+    trace: DecisionTrace,
+    incident: Any,
+    fixer_state: dict[str, Any],
+    hitl_decision: HITLDecision,
+    prometheus_client: PrometheusClient | None,
+    kubernetes_client: KubernetesClient | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    execution_result = dict(trace.execution_result)
+    verification_result = dict(trace.verification_result)
+    approved_action = _approved_action_for_execution(trace, hitl_decision)
+    if approved_action is None:
+        failure_reason = "No approved action was available for shadow verification."
+        verifier_state = {
+            "verification_plan": None,
+            "verification_result_v2": None,
+            "verification_status": "not_run",
+            "errors": [failure_reason],
+            "final": True,
+            "status": "not_run",
+            "failure_reason": failure_reason,
+        }
+        return verifier_state, {
+            "status": "not_run",
+            "summary": "Shadow verification was not run because no approved action could be resolved.",
+            "input_summary": {
+                "incident_id": incident.incident_id,
+                "incident_class": incident.incident_class,
+                "action_id": execution_result.get("action_id"),
+                "action_type": execution_result.get("action_type"),
+            },
+            "output_summary": {
+                "verification_status": "not_run",
+                "check_count": 0,
+                "passed_check_count": 0,
+                "warning_count": 0,
+                "failure_reason": failure_reason,
+            },
+        }
+
+    execution_status = str(execution_result.get("status", "not_run"))
+    if execution_status != "succeeded" or verification_result.get("post_check", {}).get("status") == "not_run":
+        reason = "Shadow verification did not run because the v1 action did not reach a real post-check."
+        if trace.final_state in {"pending_approval", "rejected", "escalated"} or execution_status in {"failed", "not_executed", "halted", "skipped"}:
+            reason = "Shadow verification did not run because the approved action did not execute to completion."
+        verifier_state = {
+            "verification_plan": None,
+            "verification_result_v2": None,
+            "verification_status": "not_run",
+            "errors": [],
+            "final": True,
+            "status": "not_run",
+        }
+        return verifier_state, {
+            "status": "not_run",
+            "summary": reason,
+            "input_summary": {
+                "incident_id": incident.incident_id,
+                "incident_class": incident.incident_class,
+                "action_id": approved_action.action_id,
+                "action_type": approved_action.action_type,
+            },
+            "output_summary": {
+                "verification_status": "not_run",
+                "check_count": 0,
+                "passed_check_count": 0,
+                "warning_count": 0,
+            },
+        }
+
+    synthesis_state = fixer_state.get("_synthesizer_state") or {}
+    synthesis_output = synthesis_state.get("synthesis_output")
+    observation_bundle = fixer_state.get("_observation_bundle")
+    verification_plan = build_shadow_verification_plan(
+        approved_action=approved_action,
+        synthesis_output=synthesis_output,
+        observation_bundle=observation_bundle,
+    )
+    if verification_plan is None:
+        failure_reason = "Shadow verification could not build a runnable verification plan."
+        verifier_state = {
+            "verification_plan": None,
+            "verification_result_v2": None,
+            "verification_status": "not_run",
+            "errors": [failure_reason],
+            "final": True,
+            "status": "not_run",
+            "failure_reason": failure_reason,
+        }
+        return verifier_state, {
+            "status": "not_run",
+            "summary": failure_reason,
+            "input_summary": {
+                "incident_id": incident.incident_id,
+                "incident_class": incident.incident_class,
+                "action_id": approved_action.action_id,
+                "action_type": approved_action.action_type,
+            },
+            "output_summary": {
+                "verification_status": "not_run",
+                "check_count": 0,
+                "passed_check_count": 0,
+                "warning_count": 0,
+                "failure_reason": failure_reason,
+            },
+        }
+
+    try:
+        verification_result_v2 = run_verification(
+            verification_plan,
+            prometheus=prometheus_client or PrometheusClient(),
+            kubernetes=kubernetes_client or KubernetesClient(),
+        )
+    except Exception as exc:
+        failure_reason = f"Shadow verification failed unexpectedly: {exc}"
+        verification_result_v2 = VerificationResultV2(
+            verification_id=verification_plan.verification_id,
+            status="not_run",
+            summary="Shadow verification failed to execute.",
+            plan=verification_plan,
+            check_results=[],
+            warnings=[failure_reason],
+            failure_reason=failure_reason,
+        )
+        verifier_state = {
+            "verification_plan": verification_plan,
+            "verification_result_v2": verification_result_v2,
+            "verification_status": "not_run",
+            "errors": [failure_reason],
+            "final": True,
+            "status": "not_run",
+            "failure_reason": failure_reason,
+        }
+        return verifier_state, {
+            "status": "not_run",
+            "summary": "Shadow verification failed to execute.",
+            "input_summary": {
+                "incident_id": incident.incident_id,
+                "incident_class": incident.incident_class,
+                "action_id": approved_action.action_id,
+                "action_type": approved_action.action_type,
+            },
+            "output_summary": {
+                "verification_status": "not_run",
+                "check_count": 0,
+                "passed_check_count": 0,
+                "warning_count": 1,
+                "failure_reason": failure_reason,
+            },
+        }
+
+    if trace.rollback_triggered or trace.final_state == "rolled_back":
+        verification_result_v2 = replace(
+            verification_result_v2,
+            status="unrecovered",
+            warnings=_dedupe_strings(
+                list(verification_result_v2.warnings)
+                + ["Rollback verification remains v1-only until Phase 5B."]
+            ),
+        )
+
+    verifier_state = {
+        "verification_plan": verification_plan,
+        "verification_result_v2": verification_result_v2,
+        "verification_status": verification_result_v2.status,
+        "errors": [],
+        "final": True,
+        "status": verification_result_v2.status,
+    }
+    if verification_result_v2.failure_reason:
+        verifier_state["failure_reason"] = verification_result_v2.failure_reason
+
+    output_summary: dict[str, Any] = {
+        "verification_status": verification_result_v2.status,
+        "check_count": len(verification_result_v2.check_results),
+        "passed_check_count": sum(1 for check_result in verification_result_v2.check_results if check_result.passed),
+        "warning_count": len(verification_result_v2.warnings),
+    }
+    if verification_result_v2.failure_reason:
+        output_summary["failure_reason"] = verification_result_v2.failure_reason
+
+    return verifier_state, {
+        "status": verification_result_v2.status,
+        "summary": "Shadow verification evaluated the approved v1 action outcome.",
+        "input_summary": {
+            "incident_id": incident.incident_id,
+            "incident_class": incident.incident_class,
+            "action_id": approved_action.action_id,
+            "action_type": approved_action.action_type,
+        },
+        "output_summary": output_summary,
+    }
+
+
+def _run_shadow_replanner(
+    *,
+    trace: DecisionTrace,
+    incident: Any,
+    fixer_state: dict[str, Any],
+    hitl_decision: HITLDecision,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    verifier_state = fixer_state.get("_verifier_state")
+    approved_action = _approved_action_for_execution(trace, hitl_decision)
+    replanner_state = run_replanner_pipeline(
+        incident=incident,
+        observations=fixer_state.get("_observation_bundle"),
+        reasoner_output=(fixer_state.get("_reasoner_state") or {}).get("reasoner_output"),
+        verifier_state=verifier_state,
+        trace=trace,
+        approved_action=approved_action,
+    )
+    if replanner_state.get("status") == "not_run":
+        return replanner_state, None
+
+    replan_output = replanner_state.get("replan_output")
+    output_summary = {
+        "decision": replan_output.decision if replan_output is not None else None,
+        "proposed_intent_ids": [intent.intent_id for intent in replan_output.intents] if replan_output else [],
+        "stop_reason": replan_output.stop_reason if replan_output is not None else None,
+        "error_count": len(replanner_state.get("errors", [])),
+    }
+    if replanner_state.get("failure_reason"):
+        output_summary["failure_reason"] = replanner_state["failure_reason"]
+
+    summary = "Shadow replanner evaluated the unrecovered verification result."
+    if replan_output is not None and replan_output.decision == "propose_new_intent":
+        summary = "Shadow replanner proposed a bounded alternative intent after unrecovered verification."
+    if replan_output is not None and replan_output.decision == "escalate":
+        summary = "Shadow replanner recommended escalation after unrecovered verification."
+
+    return replanner_state, {
+        "status": replanner_state.get("status", "failed"),
+        "summary": summary,
+        "input_summary": {
+            "incident_id": incident.incident_id,
+            "incident_class": incident.incident_class,
+            "verification_status": (verifier_state or {}).get("verification_status"),
+            "action_id": approved_action.action_id if approved_action else None,
+            "action_type": approved_action.action_type if approved_action else None,
+        },
+        "output_summary": output_summary,
+    }
+
+
+def _approved_action_for_execution(trace: DecisionTrace, hitl_decision: HITLDecision) -> RemediationAction | None:
+    action_id = str(trace.execution_result.get("action_id") or "")
+    if not action_id:
+        return None
+    for action in hitl_decision.candidate_actions:
+        if action.action_id == action_id:
+            return action
+    return None
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
 
 
 def _truncate_text(value: Any, limit: int = 200) -> str | None:
@@ -1948,7 +3002,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--fixer-model", default="gemini-2.5-flash")
     parser.add_argument("--judge-model", default="gemini-2.5-flash")
+    parser.add_argument("--reasoner-model", default="gemini-2.5-flash")
+    parser.add_argument("--critic-model", default="gemini-2.5-flash")
     parser.add_argument("--prometheus-base-url")
+    parser.add_argument(
+        "--reasoner-provider",
+        choices=("heuristic", "gemini"),
+        default="heuristic",
+    )
+    parser.add_argument(
+        "--critic-provider",
+        choices=("heuristic", "gemini"),
+        default="heuristic",
+    )
+    parser.add_argument(
+        "--engine-mode",
+        choices=VALID_ENGINE_MODES,
+        default="v1",
+    )
     return parser
 
 
@@ -1983,6 +3054,8 @@ def main() -> int:
             saved_result,
             approve_action_id=args.approve_action_id,
             reject_action_id=args.reject_action_id,
+            engine_mode=args.engine_mode,
+            critic_llm=None,
             prometheus_client=prometheus_client,
         )
     else:
@@ -1993,12 +3066,21 @@ def main() -> int:
         judge_llm = None
         if args.judge_provider == "gemini":
             judge_llm = GeminiJudgeLLM(model=args.judge_model)
+        reasoner_llm = None
+        if args.reasoner_provider == "gemini":
+            reasoner_llm = GeminiReasonerLLM(model=args.reasoner_model)
+        critic_llm = None
+        if args.critic_provider == "gemini":
+            critic_llm = GeminiCriticLLM(model=args.critic_model)
 
         if args.interactive_hitl:
             planning_result = run_recovery_from_payload(
                 payload,
+                engine_mode=args.engine_mode,
                 fixer_llm=fixer_llm,
                 judge_llm=judge_llm,
+                reasoner_llm=reasoner_llm,
+                critic_llm=critic_llm,
                 prometheus_client=prometheus_client,
             )
             result = _continue_with_interactive_hitl(
@@ -2011,8 +3093,11 @@ def main() -> int:
                 payload,
                 approve_action_id=args.approve_action_id,
                 reject_action_id=args.reject_action_id,
+                engine_mode=args.engine_mode,
                 fixer_llm=fixer_llm,
                 judge_llm=judge_llm,
+                reasoner_llm=reasoner_llm,
+                critic_llm=critic_llm,
                 prometheus_client=prometheus_client,
             )
     print(json.dumps(_to_jsonable(result), default=str, indent=2))
@@ -2052,6 +3137,7 @@ def _continue_with_interactive_hitl(
                 payload,
                 planning_result,
                 approve_action_id=action_id,
+                engine_mode=str(planning_result.get("engine_mode", "v1")),
                 kubernetes_client=kubernetes_client,
                 prometheus_client=prometheus_client,
                 execution_worker_client=execution_worker_client,
@@ -2061,6 +3147,7 @@ def _continue_with_interactive_hitl(
                 payload,
                 planning_result,
                 reject_action_id=action_id,
+                engine_mode=str(planning_result.get("engine_mode", "v1")),
                 kubernetes_client=kubernetes_client,
                 prometheus_client=prometheus_client,
                 execution_worker_client=execution_worker_client,

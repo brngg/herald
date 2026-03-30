@@ -6,6 +6,46 @@ from services.prometheus_client import PrometheusClient
 
 
 class PrometheusClientTest(unittest.TestCase):
+    def test_query_returns_successful_snapshot_value(self) -> None:
+        client = PrometheusClient(query_runner=lambda _: 3.5)
+
+        result = client.query("up")
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["value"], 3.5)
+
+    def test_range_query_uses_injected_runner(self) -> None:
+        client = PrometheusClient(
+            range_query_runner=lambda query, start, end, step: [
+                {
+                    "metric": {"__name__": query, "step": step},
+                    "values": [[start, "1"], [end, "2"]],
+                }
+            ]
+        )
+
+        result = client.range_query(
+            query="up",
+            start="2026-03-29T20:00:00+00:00",
+            end="2026-03-29T20:05:00+00:00",
+            step="30s",
+        )
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(len(result["samples"]), 1)
+        self.assertEqual(result["samples"][0]["metric"]["step"], "30s")
+
+    def test_raw_metric_snapshot_collects_each_query(self) -> None:
+        client = PrometheusClient(
+            query_runner=lambda query: 1.0 if query == "up" else 0.0,
+        )
+
+        snapshot = client.raw_metric_snapshot({"ready": "up", "incident_signal": "probe_success"})
+
+        self.assertEqual(snapshot["ready"]["status"], "succeeded")
+        self.assertEqual(snapshot["ready"]["value"], 1.0)
+        self.assertEqual(snapshot["incident_signal"]["value"], 0.0)
+
     def test_pre_check_cpu_saturation_reports_ready_to_execute(self) -> None:
         client = PrometheusClient(
             query_runner=lambda query: 0.08 if "container_cpu_usage_seconds_total" in query else 1.0,

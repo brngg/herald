@@ -90,6 +90,12 @@ The system works this way right now for a reason:
 In other words, the current demo is not trying to show unlimited autonomy. It is trying
 to prove that approval-gated Verified Recovery works end to end.
 
+Parallel HERALD 2.0 work is now underway behind a shadow path.
+When `engine_mode=v2_shadow`, HERALD collects live Kubernetes and Prometheus context,
+runs `observe -> reason -> critique -> synthesize` before bounded v1 planning, and
+then records shadow `verify -> replan` follow-up analysis after the real v1 execution
+path finishes. Execution behavior stays unchanged while the new substrate is validated.
+
 ### Future Direction: Derived Mutation Plans
 
 The longer-term idea is not to hand-author an enormous toolbox of incident-specific
@@ -180,12 +186,15 @@ Current implementation is strongest in:
 - a live-validated frontend bad-config recovery slice for `frontend`, including the `/cart` probe alert, approval-gated rollout rollback, and verified recovery
 - a bounded network-partition recovery slice for `frontend -> cartservice`, including approval-gated NetworkChaos deletion and verification
 - a partially live-exercised network-partition operator path that safely skipped execution when the incident signal had already cleared
+- a HERALD 2.0 shadow path behind `engine_mode=v2_shadow`, including typed observation bundles, a read-only cluster observer, a shadow Reasoner with typed intents, a policy Critic, a bounded Synthesizer/compiler, post-execution shadow verification, and bounded shadow replanning
 - replay artifacts and metrics for crashloop, CPU saturation, bad-config, and network-partition scenarios
 
 Still not implemented end to end:
 
 - durable workflow orchestration
 - Slack-based approval flow
+- `v2_execute` cutover where Synthesizer-driven plans replace class-based v1 routing and execution
+- a provider-backed replanning layer and true bounded multi-attempt `verify -> replan` loop on the v2 path
 
 Progress by phase:
 
@@ -271,6 +280,11 @@ The watcher will:
 - prompt `1 = investigate` or `2 = ignore`
 - if investigated, run planning and then prompt `1 = approve execution` or `2 = reject`
 
+Add `--engine-mode v2_shadow` if you want the watcher to collect live observation
+context plus shadow Reasoner, Critic, and Synthesizer output before bounded v1
+planning, then attach shadow verifier and replanner results after any real bounded
+execution without changing execution behavior.
+
 ### Run the One-Shot Terminal Inbox Flow
 
 For debugging or manual selection, you can still open the operator inbox directly:
@@ -289,6 +303,9 @@ The one-shot flow will:
 
 Gate 0 investigation approval does not authorize execution by itself. The second execution
 approval gate remains required exactly as before.
+
+You can also pass `--engine-mode v2_shadow` here to exercise the new shadow
+pipeline while keeping the v1 execution corridor authoritative.
 
 ---
 
@@ -493,6 +510,15 @@ pending `DecisionTrace`, but does not execute anything:
   --payload-file payloads/crashloop_alert.json \
   --prometheus-base-url http://localhost:9090
 ```
+
+To exercise the HERALD 2.0 shadow path without changing execution behavior, add
+`--engine-mode v2_shadow` to the same command. The workflow will record
+`observe`, `reason`, `critique`, and `synthesize` nodes, include
+`observation_bundle`, `reasoner_state`, `critic_state`, and `synthesizer_state`
+in the result, and store nested shadow output under
+`decision_trace.fixer_plan["v2_shadow"]` before handing off to the bounded v1 planner.
+If you later approve from that saved first pass, the resumed run will append shadow
+`verifier_state` and bounded `replanner_state` after the real v1 execution outcome.
 
 What to look for:
 

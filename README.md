@@ -96,9 +96,12 @@ runs `observe -> reason -> critique -> synthesize` before bounded v1 planning, a
 then records shadow `verify -> replan` follow-up analysis after the real v1 execution
 path finishes. Execution behavior stays unchanged while the new substrate is validated.
 
-A first Phase 6A cutover is also in place behind `engine_mode=v2_execute`.
-Today that pilot only makes the bounded `delete_stresschaos` CPU-saturation action
-execute from the Synthesizer plan; every other live path still falls back to v1.
+A first Phase 6 cutover is also in place behind `engine_mode=v2_execute`.
+Today that pilot makes four bounded actions execute from the Synthesizer plan:
+`delete_stresschaos` for CPU saturation, `delete_networkchaos` for the
+network-partition slice, the bad-config `rollout_undo_deployment` path for
+`frontend`, and the crashloop `rollout_undo_deployment` path for `cartservice`.
+Other live paths still fall back to v1.
 
 ### Future Direction: Derived Mutation Plans
 
@@ -191,14 +194,14 @@ Current implementation is strongest in:
 - a bounded network-partition recovery slice for `frontend -> cartservice`, including approval-gated NetworkChaos deletion and verification
 - a partially live-exercised network-partition operator path that safely skipped execution when the incident signal had already cleared
 - a HERALD 2.0 shadow path behind `engine_mode=v2_shadow`, including typed observation bundles, a read-only cluster observer, a shadow Reasoner with typed intents, a policy Critic, a bounded Synthesizer/compiler, post-execution shadow verification, and bounded shadow replanning
-- a Phase 6A `v2_execute` pilot for `delete_stresschaos`, where the approved CPU-saturation action now dispatches from the Synthesizer plan instead of the v1 hardcoded execution mapping
+- a Phase 6 `v2_execute` pilot for the bounded chaos-delete families plus the rollback paths, where the approved CPU-saturation, network-partition, bad-config, and crashloop rollback actions now dispatch from the Synthesizer plan instead of the v1 hardcoded execution mapping
 - replay artifacts and metrics for crashloop, CPU saturation, bad-config, and network-partition scenarios
 
 Still not implemented end to end:
 
 - durable workflow orchestration
 - Slack-based approval flow
-- full `v2_execute` cutover where Synthesizer-driven plans replace class-based v1 routing and execution beyond the current `delete_stresschaos` pilot
+- full `v2_execute` cutover where Synthesizer-driven plans replace class-based v1 routing and execution beyond the current delete-and-rollback pilot
 - a provider-backed replanning layer and true bounded multi-attempt `verify -> replan` loop on the v2 path
 
 Progress by phase:
@@ -290,9 +293,10 @@ context plus shadow Reasoner, Critic, and Synthesizer output before bounded v1
 planning, then attach shadow verifier and replanner results after any real bounded
 execution without changing execution behavior.
 
-For the current Phase 6A pilot, `--engine-mode v2_execute` makes the CPU saturation
-`delete_stresschaos` action execute from the Synthesizer plan. Other actions still
-route through the bounded v1 execution path in that mode.
+For the current Phase 6 pilot, `--engine-mode v2_execute` makes the chaos-delete
+actions for the CPU saturation and network-partition slices, plus the bad-config
+and crashloop rollback paths, execute from the Synthesizer plan. Other actions
+still route through the bounded v1 execution path in that mode.
 
 ### Run the One-Shot Terminal Inbox Flow
 
@@ -316,8 +320,10 @@ approval gate remains required exactly as before.
 You can also pass `--engine-mode v2_shadow` here to exercise the new shadow
 pipeline while keeping the v1 execution corridor authoritative.
 
-`--engine-mode v2_execute` is now partially live: the CPU saturation slice uses the
-Synthesizer plan for execution, while all other slices still fall back to v1.
+`--engine-mode v2_execute` is now partially live: the CPU saturation and
+network-partition slices use the Synthesizer plan for execution, and the
+bad-config plus crashloop rollback paths do too, while the crashloop restart
+path still falls back to v1.
 
 ---
 
@@ -532,10 +538,11 @@ in the result, and store nested shadow output under
 If you later approve from that saved first pass, the resumed run will append shadow
 `verifier_state` and bounded `replanner_state` after the real v1 execution outcome.
 
-To exercise the current Phase 6A cutover, use `--engine-mode v2_execute`. In that
-mode the approved CPU saturation `delete_stresschaos` action dispatches from the
-Synthesizer plan, while the other supported slices still fall back to the bounded
-v1 executor path.
+To exercise the current Phase 6 cutover, use `--engine-mode v2_execute`. In that
+mode the approved chaos-delete actions for CPU saturation and network partition,
+plus the bad-config and crashloop rollback paths, dispatch from the Synthesizer
+plan, while the crashloop restart path still falls back to the bounded v1
+executor path.
 
 What to look for:
 

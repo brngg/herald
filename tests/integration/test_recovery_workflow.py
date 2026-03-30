@@ -1534,10 +1534,10 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         result = run_crashloop_recovery_from_payload(
             _crashloop_payload(),
             engine_mode="v2_execute",
-            approve_action_id="rollout_undo_cartservice",
+            approve_action_id="restart_cartservice",
             kubernetes_client=kubernetes,
             prometheus_client=PrometheusClient(query_runner=query_runner, sleep_fn=lambda _: None),
-            execution_worker_client=_worker_client(),
+            execution_worker_client=_worker_client(stdout="deployment.apps/cartservice restarted\n"),
         )
 
         trace = result["decision_trace"]
@@ -1545,9 +1545,197 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(result["engine_mode"], "v2_execute")
         self.assertEqual(trace.execution_result["status"], "succeeded")
         self.assertEqual(trace.execution_result["dispatch_source"], "v1_fallback_non_pilot")
-        self.assertIn("Phase 6A v2_execute only pilots", trace.execution_result["dispatch_fallback_reason"])
-        self.assertEqual(trace.execution_result["action_type"], "rollout_undo_deployment")
+        self.assertIn("Current v2_execute pilot only supports", trace.execution_result["dispatch_fallback_reason"])
+        self.assertEqual(trace.execution_result["action_type"], "rollout_restart_deployment")
         self.assertEqual(trace.final_state, "recovered")
+
+    def test_v2_execute_network_partition_pilot_uses_synthesized_dispatch(self) -> None:
+        network_queries = iter([0.0, 0.0, 150.0])
+
+        def query_runner(query: str) -> float:
+            if "container_network_receive_bytes_total" in query:
+                return next(network_queries)
+            if "kube_pod_status_ready" in query:
+                return 1.0
+            raise AssertionError(f"Unexpected query: {query}")
+
+        kubernetes = KubernetesClient(
+            runner=lambda command: subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout='{"items": [], "metadata": {"name": "ok"}}',
+                stderr="",
+            )
+        )
+        result = run_recovery_from_payload(
+            _network_partition_payload(),
+            engine_mode="v2_execute",
+            approve_action_id="delete_frontend_cartservice_network_partition",
+            kubernetes_client=kubernetes,
+            prometheus_client=PrometheusClient(query_runner=query_runner, sleep_fn=lambda _: None),
+            execution_worker_client=_worker_client(
+                stdout='networkchaos.chaos-mesh.org "frontend-to-cartservice-partition" deleted\n',
+            ),
+        )
+
+        trace = result["decision_trace"]
+
+        self.assertEqual(result["engine_mode"], "v2_execute")
+        self.assertEqual(
+            [item["node_name"] for item in result["decision_trace_timeline"][:4]],
+            ["observe", "reason", "critique", "synthesize"],
+        )
+        self.assertEqual(trace.execution_result["status"], "succeeded")
+        self.assertEqual(trace.execution_result["dispatch_source"], "v2_execute_synthesized_plan")
+        self.assertEqual(trace.execution_result["synthesized_intent_id"], "reasoner-delete-networkchaos")
+        self.assertEqual(trace.execution_result["execution_plan"]["operation_family"], "chaos.delete_networkchaos")
+        self.assertEqual(
+            trace.execution_result["dispatch"]["allowed_tool_names"],
+            ["get_networkchaos", "delete_networkchaos"],
+        )
+        self.assertEqual(
+            trace.execution_result["dispatch"]["parameters"]["name"],
+            "frontend-to-cartservice-partition",
+        )
+        self.assertEqual(trace.execution_result["tool_transcript"][0]["tool_name"], "delete_networkchaos")
+        self.assertEqual(trace.final_state, "recovered")
+        self.assertNotIn("verify", trace.node_runs_by_node)
+        self.assertNotIn("replan", trace.node_runs_by_node)
+
+    def test_v2_execute_bad_config_pilot_uses_synthesized_dispatch(self) -> None:
+        probe_queries = iter([0.0, 0.0, 1.0])
+        commands: list[list[str]] = []
+
+        def query_runner(query: str) -> float:
+            if "probe_success" in query:
+                return next(probe_queries)
+            if "kube_pod_status_ready" in query:
+                return 1.0
+            raise AssertionError(f"Unexpected query: {query}")
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout="ok",
+                stderr="",
+            )
+
+        result = run_recovery_from_payload(
+            _bad_config_payload(),
+            engine_mode="v2_execute",
+            approve_action_id="rollout_undo_frontend_bad_config",
+            kubernetes_client=KubernetesClient(runner=runner),
+            prometheus_client=PrometheusClient(query_runner=query_runner, sleep_fn=lambda _: None),
+            execution_worker_client=_worker_client(
+                stdout="deployment.apps/frontend rolled back\n",
+            ),
+        )
+
+        trace = result["decision_trace"]
+
+        self.assertEqual(result["engine_mode"], "v2_execute")
+        self.assertEqual(
+            [item["node_name"] for item in result["decision_trace_timeline"][:4]],
+            ["observe", "reason", "critique", "synthesize"],
+        )
+        self.assertEqual(trace.execution_result["status"], "succeeded")
+        self.assertEqual(trace.execution_result["dispatch_source"], "v2_execute_synthesized_plan")
+        self.assertEqual(trace.execution_result["synthesized_intent_id"], "reasoner-rollout-undo-frontend")
+        self.assertEqual(trace.execution_result["execution_plan"]["operation_family"], "rollout.undo_deployment")
+        self.assertEqual(
+            trace.execution_result["dispatch"]["allowed_tool_names"],
+            ["get_deployment_context", "get_rollout_status", "rollout_undo_deployment"],
+        )
+        self.assertEqual(trace.execution_result["dispatch"]["parameters"]["deployment"], "frontend")
+        self.assertEqual(trace.execution_result["tool_transcript"][0]["tool_name"], "rollout_undo_deployment")
+        self.assertEqual(trace.verification_result["post_check"]["status"], "recovered")
+        self.assertEqual(trace.final_state, "recovered")
+        self.assertNotIn("verify", trace.node_runs_by_node)
+        self.assertNotIn("replan", trace.node_runs_by_node)
+        self.assertIn(
+            ["kubectl", "rollout", "status", "deployment/frontend", "-n", "default", "--timeout=60s"],
+            commands,
+        )
+
+    def test_v2_execute_crashloop_undo_pilot_uses_synthesized_dispatch(self) -> None:
+        crashloop_queries = iter([1.0, 1.0, 0.0, 0.0, 0.0])
+        commands: list[list[str]] = []
+
+        def query_runner(query: str) -> float:
+            if "kube_pod_container_status_waiting_reason" in query:
+                return next(crashloop_queries)
+            if "kube_pod_status_ready" in query:
+                return 1.0
+            raise AssertionError(f"Unexpected query: {query}")
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            if command[:3] == ["kubectl", "logs", "cartservice-7d6b9f5bb4-abcde"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout="Authorization: bearer-token\nhealthy\n",
+                    stderr="",
+                )
+            if command[:3] == ["kubectl", "rollout", "history"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout="deployment.apps/cartservice with revision #3\n",
+                    stderr="",
+                )
+            if command[:3] == ["kubectl", "rollout", "status"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout='deployment "cartservice" successfully rolled out\n',
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout='{"items": [], "metadata": {"name": "ok"}}',
+                stderr="",
+            )
+
+        result = run_crashloop_recovery_from_payload(
+            _crashloop_payload(),
+            engine_mode="v2_execute",
+            approve_action_id="rollout_undo_cartservice",
+            kubernetes_client=KubernetesClient(runner=runner),
+            prometheus_client=PrometheusClient(query_runner=query_runner, sleep_fn=lambda _: None),
+            execution_worker_client=_worker_client(
+                stdout="deployment.apps/cartservice rolled back\n",
+            ),
+        )
+
+        trace = result["decision_trace"]
+
+        self.assertEqual(result["engine_mode"], "v2_execute")
+        self.assertEqual(
+            [item["node_name"] for item in result["decision_trace_timeline"][:4]],
+            ["observe", "reason", "critique", "synthesize"],
+        )
+        self.assertEqual(trace.execution_result["status"], "succeeded")
+        self.assertEqual(trace.execution_result["dispatch_source"], "v2_execute_synthesized_plan")
+        self.assertEqual(trace.execution_result["synthesized_intent_id"], "reasoner-rollout-undo-cartservice")
+        self.assertEqual(trace.execution_result["execution_plan"]["operation_family"], "rollout.undo_deployment")
+        self.assertEqual(
+            trace.execution_result["dispatch"]["allowed_tool_names"],
+            ["get_deployment_context", "get_rollout_status", "rollout_undo_deployment"],
+        )
+        self.assertEqual(trace.execution_result["dispatch"]["parameters"]["deployment"], "cartservice")
+        self.assertEqual(trace.execution_result["tool_transcript"][0]["tool_name"], "rollout_undo_deployment")
+        self.assertEqual(trace.verification_result["post_check"]["status"], "recovered")
+        self.assertEqual(trace.final_state, "recovered")
+        self.assertNotIn("verify", trace.node_runs_by_node)
+        self.assertNotIn("replan", trace.node_runs_by_node)
+        self.assertIn(
+            ["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"],
+            commands,
+        )
 
     def test_cpu_workflow_marks_rejected_when_human_rejects_action(self) -> None:
         result = run_recovery_from_payload(

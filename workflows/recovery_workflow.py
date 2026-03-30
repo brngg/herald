@@ -41,7 +41,20 @@ from workflows.hitl_gate import (
 )
 
 ROLLOUT_WAIT_TIMEOUT_SECONDS = 60
-PHASE6A_V2_EXECUTION_ACTION_TYPES = frozenset({"delete_stresschaos"})
+PHASE6_V2_EXECUTION_PILOT_ACTION_IDS = frozenset(
+    {
+        "delete_frontend_cpu_stresschaos",
+        "delete_frontend_cartservice_network_partition",
+        "rollout_undo_frontend_bad_config",
+        "rollout_undo_cartservice",
+    }
+)
+PHASE6_V2_EXECUTION_PILOT_LABELS = (
+    "delete_stresschaos (cpu_saturation)",
+    "delete_networkchaos (network_partition)",
+    "rollout_undo_deployment (bad_config)",
+    "rollout_undo_deployment (crashloop)",
+)
 EngineMode = Literal["v1", "v2_shadow", "v2_execute"]
 VALID_ENGINE_MODES: tuple[EngineMode, ...] = ("v1", "v2_shadow", "v2_execute")
 
@@ -1840,16 +1853,17 @@ def _build_execution_dispatch_for_mode(
             "dispatch_source": "v1_action_mapping",
         }
 
-    if action.action_type not in PHASE6A_V2_EXECUTION_ACTION_TYPES:
+    if action.action_id not in PHASE6_V2_EXECUTION_PILOT_ACTION_IDS:
         return _build_execution_dispatch(incident_id=incident_id, action=action), {
             "dispatch_source": "v1_fallback_non_pilot",
             "dispatch_fallback_reason": (
-                f"Phase 6A v2_execute only pilots {sorted(PHASE6A_V2_EXECUTION_ACTION_TYPES)}; "
-                f"{action.action_type!r} still runs on the bounded v1 execution path."
+                "Current v2_execute pilot only supports "
+                f"{list(PHASE6_V2_EXECUTION_PILOT_LABELS)}; "
+                f"{action.action_id!r} still runs on the bounded v1 execution path."
             ),
         }
 
-    synthesized_plan, fallback_reason = _select_phase6a_execution_plan(
+    synthesized_plan, fallback_reason = _select_phase6_execution_plan(
         action=action,
         fixer_state=fixer_state,
     )
@@ -1863,7 +1877,7 @@ def _build_execution_dispatch_for_mode(
     if not bool(dispatch_preview.get("executable")):
         return _build_execution_dispatch(incident_id=incident_id, action=action), {
             "dispatch_source": "v1_fallback_invalid_v2_plan",
-            "dispatch_fallback_reason": "Synthesized execution plan was non-executable for the Phase 6A pilot.",
+            "dispatch_fallback_reason": "Synthesized execution plan was non-executable for the Phase 6 pilot.",
         }
 
     return ExecutionDispatch(
@@ -1882,7 +1896,7 @@ def _build_execution_dispatch_for_mode(
     }
 
 
-def _select_phase6a_execution_plan(
+def _select_phase6_execution_plan(
     *,
     action: RemediationAction,
     fixer_state: dict[str, Any],
@@ -1905,7 +1919,10 @@ def _select_phase6a_execution_plan(
             continue
         if dispatch_preview.get("action_type") != action.action_type:
             continue
-        if dict(dispatch_preview.get("parameters", {})) != dict(action.parameters):
+        if not _dispatch_parameters_match_action(
+            dispatch_parameters=dict(dispatch_preview.get("parameters", {})),
+            action=action,
+        ):
             continue
         if plan.steps[0].tool_name != action.action_type:
             continue
@@ -1913,9 +1930,28 @@ def _select_phase6a_execution_plan(
 
     if not matching_plans:
         return None, (
-            "No synthesized single-step execution plan matched the approved action for the Phase 6A pilot."
+            "No synthesized single-step execution plan matched the approved action for the Phase 6 pilot."
         )
     return matching_plans[0], None
+
+
+def _dispatch_parameters_match_action(
+    *,
+    dispatch_parameters: dict[str, Any],
+    action: RemediationAction,
+) -> bool:
+    if action.action_type in {"delete_stresschaos", "delete_networkchaos"}:
+        expected = {
+            "namespace": str(action.parameters["namespace"]),
+            "name": str(action.parameters["name"]),
+        }
+        return dispatch_parameters == expected
+
+    expected = {
+        "namespace": str(action.parameters["namespace"]),
+        "deployment": str(action.parameters["deployment"]),
+    }
+    return dispatch_parameters == expected
 
 
 def _build_execution_result(

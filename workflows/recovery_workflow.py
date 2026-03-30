@@ -15,6 +15,7 @@ from agents.reasoner import run_reasoner_pipeline
 from agents.synthesizer import run_synthesizer_pipeline
 from schemas.decision_trace import DecisionTrace
 from schemas.execution import ExecutionDispatch, ExecutionResult
+from schemas.execution_plan import ExecutionPlan
 from schemas.observations import ObservationBundle, observation_bundle_from_dict
 from schemas.remediation import RemediationAction
 from schemas.verification import VerificationResultV2
@@ -28,6 +29,7 @@ from services.execution_worker import ExecutionWorkerClient
 from services.gemini_fixer_llm import GeminiFixerLLM
 from services.gemini_judge_llm import GeminiJudgeLLM
 from services.gemini_reasoner_llm import GeminiReasonerLLM
+from services.kubectl_compiler import compile_v1_dispatch_preview
 from services.kubernetes_client import KubernetesClient
 from services.prometheus_client import PrometheusClient
 from services.verification_engine import build_shadow_verification_plan, run_verification
@@ -39,6 +41,7 @@ from workflows.hitl_gate import (
 )
 
 ROLLOUT_WAIT_TIMEOUT_SECONDS = 60
+PHASE6A_V2_EXECUTION_ACTION_TYPES = frozenset({"delete_stresschaos"})
 EngineMode = Literal["v1", "v2_shadow", "v2_execute"]
 VALID_ENGINE_MODES: tuple[EngineMode, ...] = ("v1", "v2_shadow", "v2_execute")
 
@@ -694,13 +697,18 @@ def _continue_crashloop_recovery(
             decision_trace=trace,
         )
 
-    dispatch = _build_execution_dispatch(incident_id=incident.incident_id, action=approved_action)
+    dispatch, dispatch_metadata = _build_execution_dispatch_for_mode(
+        incident_id=incident.incident_id,
+        action=approved_action,
+        fixer_state=fixer_state,
+    )
     worker_handle = worker_client.dispatch_execution_worker(dispatch)
     worker_result = worker_client.collect_execution_result(worker_handle)
     execution_result = _build_execution_result(
         action=approved_action,
         dispatch=dispatch,
         worker_result=worker_result,
+        dispatch_metadata=dispatch_metadata,
     )
     trace = append_node_run(
         trace,
@@ -715,12 +723,14 @@ def _continue_crashloop_recovery(
             "worker_id": dispatch.worker_id,
             "action_id": dispatch.action_id,
             "action_type": dispatch.action_type,
+            "dispatch_source": dispatch_metadata["dispatch_source"],
         },
         output_summary={
             "worker_id": worker_result.worker_id,
             "status": worker_result.status,
             "action_id": worker_result.action_id,
             "returncode": worker_result.returncode,
+            "dispatch_source": dispatch_metadata["dispatch_source"],
             "tool_names": [entry.get("tool_name") for entry in worker_result.tool_transcript],
         },
     )
@@ -1056,13 +1066,18 @@ def _continue_bad_config_recovery(
             decision_trace=trace,
         )
 
-    dispatch = _build_execution_dispatch(incident_id=incident.incident_id, action=approved_action)
+    dispatch, dispatch_metadata = _build_execution_dispatch_for_mode(
+        incident_id=incident.incident_id,
+        action=approved_action,
+        fixer_state=fixer_state,
+    )
     worker_handle = worker_client.dispatch_execution_worker(dispatch)
     worker_result = worker_client.collect_execution_result(worker_handle)
     execution_result = _build_execution_result(
         action=approved_action,
         dispatch=dispatch,
         worker_result=worker_result,
+        dispatch_metadata=dispatch_metadata,
     )
     trace = append_node_run(
         trace,
@@ -1077,12 +1092,14 @@ def _continue_bad_config_recovery(
             "worker_id": dispatch.worker_id,
             "action_id": dispatch.action_id,
             "action_type": dispatch.action_type,
+            "dispatch_source": dispatch_metadata["dispatch_source"],
         },
         output_summary={
             "worker_id": worker_result.worker_id,
             "status": worker_result.status,
             "action_id": worker_result.action_id,
             "returncode": worker_result.returncode,
+            "dispatch_source": dispatch_metadata["dispatch_source"],
             "tool_names": [entry.get("tool_name") for entry in worker_result.tool_transcript],
         },
     )
@@ -1378,13 +1395,18 @@ def _continue_cpu_saturation_recovery(
             decision_trace=trace,
         )
 
-    dispatch = _build_execution_dispatch(incident_id=incident.incident_id, action=approved_action)
+    dispatch, dispatch_metadata = _build_execution_dispatch_for_mode(
+        incident_id=incident.incident_id,
+        action=approved_action,
+        fixer_state=fixer_state,
+    )
     worker_handle = worker_client.dispatch_execution_worker(dispatch)
     worker_result = worker_client.collect_execution_result(worker_handle)
     execution_result = _build_execution_result(
         action=approved_action,
         dispatch=dispatch,
         worker_result=worker_result,
+        dispatch_metadata=dispatch_metadata,
     )
     trace = append_node_run(
         trace,
@@ -1399,12 +1421,14 @@ def _continue_cpu_saturation_recovery(
             "worker_id": dispatch.worker_id,
             "action_id": dispatch.action_id,
             "action_type": dispatch.action_type,
+            "dispatch_source": dispatch_metadata["dispatch_source"],
         },
         output_summary={
             "worker_id": worker_result.worker_id,
             "status": worker_result.status,
             "action_id": worker_result.action_id,
             "returncode": worker_result.returncode,
+            "dispatch_source": dispatch_metadata["dispatch_source"],
             "tool_names": [entry.get("tool_name") for entry in worker_result.tool_transcript],
         },
     )
@@ -1683,13 +1707,18 @@ def _continue_network_partition_recovery(
             decision_trace=trace,
         )
 
-    dispatch = _build_execution_dispatch(incident_id=incident.incident_id, action=approved_action)
+    dispatch, dispatch_metadata = _build_execution_dispatch_for_mode(
+        incident_id=incident.incident_id,
+        action=approved_action,
+        fixer_state=fixer_state,
+    )
     worker_handle = worker_client.dispatch_execution_worker(dispatch)
     worker_result = worker_client.collect_execution_result(worker_handle)
     execution_result = _build_execution_result(
         action=approved_action,
         dispatch=dispatch,
         worker_result=worker_result,
+        dispatch_metadata=dispatch_metadata,
     )
     trace = append_node_run(
         trace,
@@ -1704,12 +1733,14 @@ def _continue_network_partition_recovery(
             "worker_id": dispatch.worker_id,
             "action_id": dispatch.action_id,
             "action_type": dispatch.action_type,
+            "dispatch_source": dispatch_metadata["dispatch_source"],
         },
         output_summary={
             "worker_id": worker_result.worker_id,
             "status": worker_result.status,
             "action_id": worker_result.action_id,
             "returncode": worker_result.returncode,
+            "dispatch_source": dispatch_metadata["dispatch_source"],
             "tool_names": [entry.get("tool_name") for entry in worker_result.tool_transcript],
         },
     )
@@ -1797,11 +1828,102 @@ def _build_execution_dispatch(*, incident_id: str, action: RemediationAction) ->
     )
 
 
+def _build_execution_dispatch_for_mode(
+    *,
+    incident_id: str,
+    action: RemediationAction,
+    fixer_state: dict[str, Any],
+) -> tuple[ExecutionDispatch, dict[str, Any]]:
+    engine_mode = str(fixer_state.get("_engine_mode", "v1"))
+    if engine_mode != "v2_execute":
+        return _build_execution_dispatch(incident_id=incident_id, action=action), {
+            "dispatch_source": "v1_action_mapping",
+        }
+
+    if action.action_type not in PHASE6A_V2_EXECUTION_ACTION_TYPES:
+        return _build_execution_dispatch(incident_id=incident_id, action=action), {
+            "dispatch_source": "v1_fallback_non_pilot",
+            "dispatch_fallback_reason": (
+                f"Phase 6A v2_execute only pilots {sorted(PHASE6A_V2_EXECUTION_ACTION_TYPES)}; "
+                f"{action.action_type!r} still runs on the bounded v1 execution path."
+            ),
+        }
+
+    synthesized_plan, fallback_reason = _select_phase6a_execution_plan(
+        action=action,
+        fixer_state=fixer_state,
+    )
+    if synthesized_plan is None:
+        return _build_execution_dispatch(incident_id=incident_id, action=action), {
+            "dispatch_source": "v1_fallback_missing_v2_plan",
+            "dispatch_fallback_reason": fallback_reason or "Synthesized execution plan was unavailable.",
+        }
+
+    dispatch_preview = compile_v1_dispatch_preview(synthesized_plan)
+    if not bool(dispatch_preview.get("executable")):
+        return _build_execution_dispatch(incident_id=incident_id, action=action), {
+            "dispatch_source": "v1_fallback_invalid_v2_plan",
+            "dispatch_fallback_reason": "Synthesized execution plan was non-executable for the Phase 6A pilot.",
+        }
+
+    return ExecutionDispatch(
+        incident_id=incident_id,
+        action_id=action.action_id,
+        action_type=dispatch_preview["action_type"],
+        parameters=dict(dispatch_preview["parameters"]),
+        worker_id=f"worker-{uuid4()}",
+        requested_at=_utc_now(),
+        allowed_tool_names=list(synthesized_plan.allowed_tool_names),
+        max_steps=max(5, len(synthesized_plan.steps) + 2),
+    ), {
+        "dispatch_source": "v2_execute_synthesized_plan",
+        "synthesized_intent_id": synthesized_plan.intent_id,
+        "execution_plan": _to_jsonable(synthesized_plan),
+    }
+
+
+def _select_phase6a_execution_plan(
+    *,
+    action: RemediationAction,
+    fixer_state: dict[str, Any],
+) -> tuple[ExecutionPlan | None, str | None]:
+    synthesizer_state = fixer_state.get("_synthesizer_state") or {}
+    synthesis_output = synthesizer_state.get("synthesis_output")
+    if synthesis_output is None:
+        return None, "Synthesizer output was unavailable during v2_execute dispatch selection."
+
+    matching_plans: list[ExecutionPlan] = []
+    for plan in list(getattr(synthesis_output, "plans", [])):
+        if not isinstance(plan, ExecutionPlan):
+            continue
+        if not plan.steps or len(plan.steps) != 1:
+            continue
+        if not plan.requires_approval or plan.blast_radius_score >= 0.8:
+            continue
+        dispatch_preview = compile_v1_dispatch_preview(plan)
+        if not bool(dispatch_preview.get("executable")):
+            continue
+        if dispatch_preview.get("action_type") != action.action_type:
+            continue
+        if dict(dispatch_preview.get("parameters", {})) != dict(action.parameters):
+            continue
+        if plan.steps[0].tool_name != action.action_type:
+            continue
+        matching_plans.append(plan)
+
+    if not matching_plans:
+        return None, (
+            "No synthesized single-step execution plan matched the approved action for the Phase 6A pilot."
+        )
+    return matching_plans[0], None
+
+
 def _build_execution_result(
     *,
     action: RemediationAction,
     dispatch: ExecutionDispatch,
     worker_result: ExecutionResult,
+    dispatch_metadata: dict[str, Any] | None = None,
 ) -> dict[str, object]:
     namespace = str(action.parameters["namespace"])
     result: dict[str, object] = {
@@ -1820,6 +1942,19 @@ def _build_execution_result(
         "summary": worker_result.summary,
         "tool_transcript": worker_result.tool_transcript,
     }
+    metadata = dict(dispatch_metadata or {})
+    dispatch_source = metadata.get("dispatch_source")
+    if isinstance(dispatch_source, str) and dispatch_source:
+        result["dispatch_source"] = dispatch_source
+    dispatch_fallback_reason = metadata.get("dispatch_fallback_reason")
+    if isinstance(dispatch_fallback_reason, str) and dispatch_fallback_reason:
+        result["dispatch_fallback_reason"] = dispatch_fallback_reason
+    synthesized_intent_id = metadata.get("synthesized_intent_id")
+    if isinstance(synthesized_intent_id, str) and synthesized_intent_id:
+        result["synthesized_intent_id"] = synthesized_intent_id
+    execution_plan = metadata.get("execution_plan")
+    if isinstance(execution_plan, dict):
+        result["execution_plan"] = execution_plan
     if action.action_type in {"delete_stresschaos", "delete_networkchaos"}:
         result["name"] = str(action.parameters["name"])
     else:

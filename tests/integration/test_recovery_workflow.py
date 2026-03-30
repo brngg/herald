@@ -1463,6 +1463,92 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertNotIn("rollout_wait", trace.node_runs_by_node)
         self.assertIn("execution_worker", trace.node_runs_by_node)
 
+    def test_v2_execute_cpu_pilot_uses_synthesized_dispatch(self) -> None:
+        cpu_queries = iter([0.08, 0.08, 0.02])
+
+        def query_runner(query: str) -> float:
+            if "container_cpu_usage_seconds_total" in query:
+                return next(cpu_queries)
+            if "kube_pod_status_ready" in query:
+                return 1.0
+            raise AssertionError(f"Unexpected query: {query}")
+
+        kubernetes = KubernetesClient(
+            runner=lambda command: subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout='{"items": [], "metadata": {"name": "ok"}}',
+                stderr="",
+            )
+        )
+        result = run_recovery_from_payload(
+            _cpu_payload(),
+            engine_mode="v2_execute",
+            approve_action_id="delete_frontend_cpu_stresschaos",
+            kubernetes_client=kubernetes,
+            prometheus_client=PrometheusClient(query_runner=query_runner, sleep_fn=lambda _: None),
+            execution_worker_client=_worker_client(
+                stdout='stresschaos.chaos-mesh.org "frontend-cpu-saturation" deleted\n',
+            ),
+        )
+
+        trace = result["decision_trace"]
+
+        self.assertEqual(result["engine_mode"], "v2_execute")
+        self.assertEqual(
+            [item["node_name"] for item in result["decision_trace_timeline"][:4]],
+            ["observe", "reason", "critique", "synthesize"],
+        )
+        self.assertEqual(trace.execution_result["status"], "succeeded")
+        self.assertEqual(trace.execution_result["dispatch_source"], "v2_execute_synthesized_plan")
+        self.assertEqual(trace.execution_result["synthesized_intent_id"], "reasoner-delete-frontend-stresschaos")
+        self.assertEqual(trace.execution_result["execution_plan"]["operation_family"], "chaos.delete_stresschaos")
+        self.assertEqual(
+            trace.execution_result["dispatch"]["allowed_tool_names"],
+            ["get_stresschaos", "delete_stresschaos"],
+        )
+        self.assertEqual(trace.execution_result["dispatch"]["parameters"]["name"], "frontend-cpu-saturation")
+        self.assertEqual(trace.execution_result["tool_transcript"][0]["tool_name"], "delete_stresschaos")
+        self.assertEqual(trace.final_state, "recovered")
+        self.assertNotIn("verify", trace.node_runs_by_node)
+        self.assertNotIn("replan", trace.node_runs_by_node)
+
+    def test_v2_execute_non_pilot_slice_falls_back_to_v1_dispatch(self) -> None:
+        crashloop_queries = iter([1.0, 1.0, 0.0, 0.0, 0.0])
+
+        def query_runner(query: str) -> float:
+            if "kube_pod_container_status_waiting_reason" in query:
+                return next(crashloop_queries)
+            if "kube_pod_status_ready" in query:
+                return 1.0
+            raise AssertionError(f"Unexpected query: {query}")
+
+        kubernetes = KubernetesClient(
+            runner=lambda command: subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout='{"items": [], "metadata": {"name": "ok"}}',
+                stderr="",
+            )
+        )
+        result = run_crashloop_recovery_from_payload(
+            _crashloop_payload(),
+            engine_mode="v2_execute",
+            approve_action_id="rollout_undo_cartservice",
+            kubernetes_client=kubernetes,
+            prometheus_client=PrometheusClient(query_runner=query_runner, sleep_fn=lambda _: None),
+            execution_worker_client=_worker_client(),
+        )
+
+        trace = result["decision_trace"]
+
+        self.assertEqual(result["engine_mode"], "v2_execute")
+        self.assertEqual(trace.execution_result["status"], "succeeded")
+        self.assertEqual(trace.execution_result["dispatch_source"], "v1_fallback_non_pilot")
+        self.assertIn("Phase 6A v2_execute only pilots", trace.execution_result["dispatch_fallback_reason"])
+        self.assertEqual(trace.execution_result["action_type"], "rollout_undo_deployment")
+        self.assertEqual(trace.final_state, "recovered")
+
     def test_cpu_workflow_marks_rejected_when_human_rejects_action(self) -> None:
         result = run_recovery_from_payload(
             _cpu_payload(),

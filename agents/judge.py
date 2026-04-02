@@ -4,8 +4,8 @@ from typing import Any, Literal, NotRequired, TypedDict
 
 from schemas.incident import Incident
 from schemas.remediation import RemediationAction
-from services.incident_normalization import normalize_incident_class
-from services.judge_llm import JudgeLLM, JudgeLLMResult
+from services.normalization.incident import normalize_incident_class
+from services.llm.tasks.judge_contract import JudgeLLM, JudgeLLMResult
 
 
 JudgeVerdict = Literal["pass", "fail", "n/a"]

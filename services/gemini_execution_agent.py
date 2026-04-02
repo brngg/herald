@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
 from schemas.execution import ExecutionDispatch, ExecutionStatus, ExecutionToolName
-
-
-GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+from services.llm.gemini import (
+    build_generate_content_request as _shared_build_generate_content_request,
+    extract_response_text as _shared_extract_response_text,
+    get_gemini_api_key as _shared_get_gemini_api_key,
+    request_structured_json,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,27 +61,16 @@ class GeminiExecutionAgentLLM(ExecutionAgentLLM):
         dispatch: ExecutionDispatch,
         tool_transcript: list[dict[str, Any]],
     ) -> ExecutionAgentDecision:
-        import httpx
-
-        url, headers, body = _build_generate_content_request(
-            model=self.model,
+        prompt = _build_execution_agent_prompt(
             dispatch=dispatch,
             tool_transcript=tool_transcript,
         )
-
-        with httpx.Client(timeout=self.timeout_seconds) as client:
-            response = client.post(url, headers=headers, json=body)
-            response.raise_for_status()
-            payload = response.json()
-
-        if not isinstance(payload, dict):
-            raise ValueError("Gemini response JSON must be an object")
-
-        output_text = _extract_response_text(payload)
-        output_payload = json.loads(output_text)
-        if not isinstance(output_payload, dict):
-            raise ValueError("Gemini structured output must be a JSON object")
-
+        _, output_payload = request_structured_json(
+            model=self.model,
+            prompt=prompt,
+            response_json_schema=execution_agent_output_json_schema(),
+            timeout_seconds=self.timeout_seconds,
+        )
         return parse_execution_agent_decision(output_payload)
 
 
@@ -236,6 +227,11 @@ class GeminiExecutionAgent:
                 )
 
             try:
+                effective_arguments = _effective_tool_arguments(
+                    dispatch=dispatch,
+                    tool=tool,
+                    decision_arguments=decision.arguments,
+                )
                 logger(
                     "tool_call_started",
                     {
@@ -245,7 +241,7 @@ class GeminiExecutionAgent:
                         "tool_name": decision.tool_name,
                     },
                 )
-                tool_result = tool.callable(**decision.arguments)
+                tool_result = tool.callable(**effective_arguments)
             except Exception as exc:
                 logger(
                     "tool_call_failed",
@@ -279,7 +275,7 @@ class GeminiExecutionAgent:
                 {
                     "step": step_index,
                     "tool_name": decision.tool_name,
-                    "arguments": dict(decision.arguments),
+                    "arguments": dict(effective_arguments),
                     "result": compact_result,
                 }
             )
@@ -363,19 +359,11 @@ def _build_generate_content_request(
     tool_transcript: list[dict[str, Any]],
 ) -> tuple[str, dict[str, str], dict[str, Any]]:
     prompt = _build_execution_agent_prompt(dispatch=dispatch, tool_transcript=tool_transcript)
-    url = f"{GEMINI_API_BASE_URL}/{model}:generateContent"
-    headers = {
-        "x-goog-api-key": _get_gemini_api_key(),
-        "Content-Type": "application/json",
-    }
-    body = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseJsonSchema": execution_agent_output_json_schema(),
-        },
-    }
-    return url, headers, body
+    return _shared_build_generate_content_request(
+        model=model,
+        prompt=prompt,
+        response_json_schema=execution_agent_output_json_schema(),
+    )
 
 
 def _build_execution_agent_prompt(
@@ -420,6 +408,36 @@ def _compact_tool_result(tool_result: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def _effective_tool_arguments(
+    *,
+    dispatch: ExecutionDispatch,
+    tool: ExecutionTool,
+    decision_arguments: dict[str, Any],
+) -> dict[str, Any]:
+    if tool.mutation:
+        return dict(dispatch.parameters)
+    approved_arguments = _approved_readonly_arguments(dispatch=dispatch, tool_name=tool.name)
+    return {**approved_arguments, **dict(decision_arguments)}
+
+
+def _approved_readonly_arguments(
+    *,
+    dispatch: ExecutionDispatch,
+    tool_name: ExecutionToolName,
+) -> dict[str, Any]:
+    if tool_name in {"get_deployment_context", "get_rollout_status"}:
+        return {
+            "namespace": dispatch.parameters["namespace"],
+            "deployment": dispatch.parameters["deployment"],
+        }
+    if tool_name in {"get_stresschaos", "get_networkchaos"}:
+        return {
+            "namespace": dispatch.parameters["namespace"],
+            "name": dispatch.parameters["name"],
+        }
+    return {}
+
+
 def _truncate_text(value: str, limit: int = 400) -> str:
     if len(value) <= limit:
         return value
@@ -431,40 +449,11 @@ def _noop_event_logger(_: str, __: dict[str, Any]) -> None:
 
 
 def _extract_response_text(payload: dict[str, Any]) -> str:
-    candidates = payload.get("candidates")
-    if not isinstance(candidates, list) or not candidates:
-        raise ValueError("Gemini response missing candidates")
-
-    first = candidates[0]
-    if not isinstance(first, dict):
-        raise ValueError("Gemini candidate must be an object")
-
-    content = first.get("content")
-    if not isinstance(content, dict):
-        raise ValueError("Gemini candidate missing content")
-
-    parts = content.get("parts")
-    if not isinstance(parts, list) or not parts:
-        raise ValueError("Gemini candidate missing content parts")
-
-    text_fragments: list[str] = []
-    for part in parts:
-        if isinstance(part, dict):
-            text = part.get("text")
-            if isinstance(text, str):
-                text_fragments.append(text)
-
-    output_text = "".join(text_fragments).strip()
-    if not output_text:
-        raise ValueError("Gemini response did not contain text output")
-    return output_text
+    return _shared_extract_response_text(payload)
 
 
 def _get_gemini_api_key() -> str:
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
-        raise EnvironmentError("Set GEMINI_API_KEY or GOOGLE_API_KEY before calling Gemini.")
-    return api_key
+    return _shared_get_gemini_api_key()
 
 
 def _valid_tool_names() -> tuple[ExecutionToolName, ...]:
@@ -475,6 +464,7 @@ def _valid_tool_names() -> tuple[ExecutionToolName, ...]:
         "get_networkchaos",
         "rollout_undo_deployment",
         "rollout_restart_deployment",
+        "scale_deployment",
         "delete_stresschaos",
         "delete_networkchaos",
     )

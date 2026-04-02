@@ -4,7 +4,10 @@ import unittest
 
 from schemas.intents import CapabilityCatalog
 from schemas.observations import ObservationBundle
-from services.reasoner_llm import build_reasoner_prompts, reasoner_output_json_schema
+from services.llm.tasks.reasoner_contract import (
+    build_reasoner_prompts,
+    reasoner_output_json_schema,
+)
 
 
 class ReasonerLLMTest(unittest.TestCase):
@@ -27,6 +30,20 @@ class ReasonerLLMTest(unittest.TestCase):
             kubernetes={
                 "pod_logs": {"status": "succeeded", "output": "Authorization: secret-token\npassword=hunter2"},
                 "deployment": {"status": "succeeded"},
+                "deployment_summary": {
+                    "config_map_refs": ["cartservice-config"],
+                    "secret_refs": ["cartservice-secret"],
+                    "command_overrides": [["/herald-intentional-crash"]],
+                },
+                "pod_status_summary": {
+                    "waiting_reasons": {"RunContainerError": 1},
+                    "termination_reasons": {"StartError": 1},
+                    "restart_total": 4,
+                },
+                "event_summary": {
+                    "warning_count": 1,
+                    "recent_warnings": [{"reason": "Failed"}],
+                },
             },
             prometheus={
                 "ready": {"status": "succeeded", "value": 1.0},
@@ -46,7 +63,9 @@ class ReasonerLLMTest(unittest.TestCase):
 
         self.assertIn("HERALD Reasoner", system_prompt)
         self.assertIn('"incident_id": "incident-123"', user_prompt)
-        self.assertIn('"kubernetes_sections": ["deployment", "pod_logs"]', user_prompt)
+        self.assertIn('"kubernetes_sections": ["deployment", "deployment_summary", "event_summary", "pod_logs", "pod_status_summary"]', user_prompt)
+        self.assertIn('"waiting_reasons": {"RunContainerError": 1}', user_prompt)
+        self.assertIn('"config_map_refs": ["cartservice-config"]', user_prompt)
         self.assertIn('"value": 2.0', user_prompt)
         self.assertNotIn("hunter2", user_prompt)
         self.assertNotIn("secret-token", user_prompt)

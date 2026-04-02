@@ -7,8 +7,8 @@ from agents.reasoner import run_reasoner_pipeline
 from agents.synthesizer import run_synthesizer_pipeline
 from schemas.incident import Incident
 from schemas.observations import ObservationBundle
-from services.capability_catalog import default_capability_catalog
-from services.cluster_observer import ClusterObserver
+from services.recovery.capability_catalog import default_capability_catalog
+from services.observability.cluster_observer import ClusterObserver
 
 
 class RecoveryGraphV2State(TypedDict):

@@ -3,11 +3,11 @@ from __future__ import annotations
 import tempfile
 import unittest
 
-from services.alert_inbox import list_inbox_records, load_inbox_record
+from services.alerts.inbox import list_inbox_records, load_inbox_record
 
 try:
     from fastapi.testclient import TestClient
-    from services.alert_inbox_service import create_app
+    from services.alerts.inbox_service import create_app
 except ModuleNotFoundError as exc:  # pragma: no cover - environment-dependent import
     TestClient = None
     create_app = None

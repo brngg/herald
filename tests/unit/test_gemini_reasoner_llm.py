@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from schemas.intents import CapabilityCatalog
 from schemas.observations import ObservationBundle
-from services.gemini_reasoner_llm import (
+from services.llm.tasks.reasoner import (
     _build_generate_content_request,
     _extract_response_text,
     _get_gemini_api_key,

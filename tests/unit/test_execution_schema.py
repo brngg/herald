@@ -29,7 +29,7 @@ class ExecutionSchemaTest(unittest.TestCase):
             ExecutionDispatch(
                 incident_id="incident-123",
                 action_id="scale-cartservice",
-                action_type="scale_deployment",  # type: ignore[arg-type]
+                action_type="kubectl_shell",  # type: ignore[arg-type]
                 parameters={"namespace": "default", "deployment": "cartservice"},
                 worker_id="worker-123",
                 requested_at="2026-03-27T03:00:00+00:00",
@@ -83,6 +83,24 @@ class ExecutionSchemaTest(unittest.TestCase):
         )
 
         self.assertEqual(dispatch.action_type, "delete_stresschaos")
+
+    def test_accepts_scale_deployment_dispatch(self) -> None:
+        dispatch = ExecutionDispatch(
+            incident_id="incident-123",
+            action_id="scale-frontend-2",
+            action_type="scale_deployment",
+            parameters={"namespace": "default", "deployment": "frontend", "replicas": 2},
+            worker_id="worker-123",
+            requested_at="2026-03-27T03:00:00+00:00",
+            allowed_tool_names=[
+                "get_deployment_context",
+                "get_rollout_status",
+                "scale_deployment",
+            ],
+            max_steps=5,
+        )
+
+        self.assertEqual(dispatch.action_type, "scale_deployment")
 
     def test_accepts_valid_execution_result(self) -> None:
         result = ExecutionResult(

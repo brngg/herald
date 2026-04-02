@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from schemas.intents import OperationIntent, ResourceTarget
-from services.policy_validator import validate_shadow_intent_policies
+from services.recovery.policy_validator import validate_shadow_intent_policies
 
 
 class PolicyValidatorTest(unittest.TestCase):

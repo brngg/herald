@@ -3,8 +3,8 @@ from __future__ import annotations
 import subprocess
 import unittest
 
-from services.kubernetes_client import KubernetesClient
-from services.prometheus_client import PrometheusClient
+from services.infra.kubernetes.client import KubernetesClient
+from services.observability.prometheus import PrometheusClient
 from tests.integration.test_recovery_workflow import (
     _bad_config_payload,
     _cpu_payload,
@@ -52,7 +52,7 @@ def _shadow_query_runner(query: str) -> float:
 
 
 class ReasonerShadowModeIntegrationTest(unittest.TestCase):
-    def test_v2_shadow_emits_intents_and_preserves_v1_recommended_action(self) -> None:
+    def test_v2_shadow_emits_intents_and_surfaces_v2_recommended_candidate(self) -> None:
         scenarios = [
             (_crashloop_payload(), "rollout_undo_cartservice"),
             (_cpu_payload(), "delete_frontend_cpu_stresschaos"),
@@ -88,7 +88,9 @@ class ReasonerShadowModeIntegrationTest(unittest.TestCase):
                     len(trace.fixer_plan["v2_shadow"]["reasoner_output"]["intents"]),
                     1,
                 )
+                recommended_candidate = result["hitl_decision"]["recommended_candidate"]
+                self.assertIsNotNone(recommended_candidate)
                 self.assertEqual(
-                    result["hitl_decision"]["recommended_action"].action_id,
+                    recommended_candidate.legacy_action_hint["action_id"],
                     expected_action_id,
                 )

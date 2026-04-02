@@ -3,8 +3,8 @@ from __future__ import annotations
 import subprocess
 import unittest
 
-from services.kubernetes_client import KubernetesClient
-from services.prometheus_client import PrometheusClient
+from services.infra.kubernetes.client import KubernetesClient
+from services.observability.prometheus import PrometheusClient
 from tests.integration.test_recovery_workflow import (
     _bad_config_payload,
     _cpu_payload,
@@ -51,7 +51,16 @@ class SynthesizerShadowModeIntegrationTest(unittest.TestCase):
                     [entry["node_name"] for entry in result["decision_trace_timeline"][:4]],
                     ["observe", "reason", "critique", "synthesize"],
                 )
-                self.assertEqual(result["hitl_decision"]["recommended_action"].action_id, expected_action_id)
+                recommended_candidate = result["hitl_decision"]["recommended_candidate"]
+                self.assertIsNotNone(recommended_candidate)
+                self.assertEqual(
+                    recommended_candidate.legacy_action_hint["action_id"],
+                    expected_action_id,
+                )
+                self.assertEqual(
+                    recommended_candidate.legacy_action_hint["action_type"],
+                    expected_action_type,
+                )
                 self.assertIn("synthesis_output", shadow)
                 self.assertIn("synthesized_v1_dispatches", shadow)
                 self.assertTrue(shadow["synthesis_output"]["plans"])

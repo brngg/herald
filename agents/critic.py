@@ -7,9 +7,13 @@ from schemas.critic import CriticOutput, CritiqueCandidate, PolicyCheckResult
 from schemas.incident import Incident
 from schemas.intents import CapabilityCatalog, ReasonerOutput
 from schemas.observations import ObservationBundle
-from services.capability_catalog import default_capability_catalog
-from services.critic_llm import CriticLLM, CriticLLMResult
-from services.policy_validator import PolicyValidationResult, summarize_policy_validation, validate_shadow_intent_policies
+from services.recovery.capability_catalog import default_capability_catalog
+from services.llm.tasks.critic_contract import CriticLLM, CriticLLMResult
+from services.recovery.policy_validator import (
+    PolicyValidationResult,
+    summarize_policy_validation,
+    validate_shadow_intent_policies,
+)
 
 
 class CriticAgentState(TypedDict):

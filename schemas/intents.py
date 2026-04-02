@@ -7,6 +7,7 @@ from typing import Any, Literal
 OperationFamily = Literal[
     "rollout.undo_deployment",
     "rollout.restart_deployment",
+    "scale.deployment",
     "chaos.delete_stresschaos",
     "chaos.delete_networkchaos",
     "escalate.human_review",
@@ -15,6 +16,7 @@ OperationFamily = Literal[
 VALID_OPERATION_FAMILIES: tuple[OperationFamily, ...] = (
     "rollout.undo_deployment",
     "rollout.restart_deployment",
+    "scale.deployment",
     "chaos.delete_stresschaos",
     "chaos.delete_networkchaos",
     "escalate.human_review",

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from agents.reasoner import run_reasoner_pipeline
 from schemas.incident import Incident
 from schemas.observations import ObservationBundle
-from services.reasoner_llm import ReasonerLLMResult
+from services.llm.tasks.reasoner_contract import ReasonerLLMResult
 
 
 def _incident(incident_class: str) -> Incident:
@@ -84,6 +84,41 @@ class ReasonerTest(unittest.TestCase):
             state["reasoner_output"].intents[0].operation_family,
             "chaos.delete_networkchaos",
         )
+
+    def test_heuristic_reasoner_uses_scale_for_zero_replica_deployment_shortfall(self) -> None:
+        observations = ObservationBundle(
+            incident_id="readiness-shortfall-123",
+            incident_class_hint="readiness_shortfall",
+            namespace_hint="default",
+            source="prometheus",
+            alert_context={
+                "labels": {"severity": "warning", "alertname": "HeraldDeploymentReadinessShortfall"},
+                "annotations": {"summary": "frontend has no ready replicas"},
+                "deployment_hint": "frontend",
+            },
+            kubernetes={
+                "deployment_summary": {
+                    "name": "frontend",
+                    "desired_replicas": 0,
+                    "ready_replicas": 0,
+                    "available_replicas": 0,
+                }
+            },
+            prometheus={
+                "ready": {"status": "succeeded", "value": 0.0},
+                "incident_signal": {"status": "succeeded", "value": 0.0},
+            },
+            collected_at="2026-03-29T20:00:00+00:00",
+        )
+
+        state = run_reasoner_pipeline(_incident("readiness_shortfall"), observations)
+
+        self.assertEqual(state["status"], "succeeded")
+        assert state["reasoner_output"] is not None
+        self.assertEqual(state["reasoner_output"].intents[0].operation_family, "scale.deployment")
+        self.assertEqual(state["reasoner_output"].intents[0].arguments["replicas"], 1)
+        self.assertTrue(state["mapped_v1_candidates"])
+        self.assertEqual(state["mapped_v1_candidates"][0].action_type, "scale_deployment")
 
 
 if __name__ == "__main__":

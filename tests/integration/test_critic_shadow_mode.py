@@ -3,8 +3,8 @@ from __future__ import annotations
 import subprocess
 import unittest
 
-from services.kubernetes_client import KubernetesClient
-from services.prometheus_client import PrometheusClient
+from services.infra.kubernetes.client import KubernetesClient
+from services.observability.prometheus import PrometheusClient
 from workflows.recovery_workflow import run_crashloop_recovery_from_payload
 
 
@@ -192,7 +192,12 @@ class CriticShadowModeIntegrationTest(unittest.TestCase):
                     [entry["node_name"] for entry in result["decision_trace_timeline"][:4]],
                     ["observe", "reason", "critique", "synthesize"],
                 )
-                self.assertEqual(result["hitl_decision"]["recommended_action"].action_id, expected_action_id)
+                recommended_candidate = result["hitl_decision"]["recommended_candidate"]
+                self.assertIsNotNone(recommended_candidate)
+                self.assertEqual(
+                    recommended_candidate.legacy_action_hint["action_id"],
+                    expected_action_id,
+                )
                 self.assertIn("critic_output", result["decision_trace"].fixer_plan["v2_shadow"])
                 self.assertIn("policy_summary", result["decision_trace"].fixer_plan["v2_shadow"])
                 self.assertIn("synthesis_output", result["decision_trace"].fixer_plan["v2_shadow"])

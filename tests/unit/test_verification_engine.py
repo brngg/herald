@@ -11,9 +11,12 @@ from schemas.intents import OperationIntent, ResourceTarget
 from schemas.observations import ObservationBundle
 from schemas.remediation import RemediationAction
 from schemas.verification import VerificationCheck, VerificationPlan
-from services.kubernetes_client import KubernetesClient
-from services.prometheus_client import PrometheusClient
-from services.verification_engine import build_shadow_verification_plan, run_verification
+from services.infra.kubernetes.client import KubernetesClient
+from services.observability.prometheus import PrometheusClient
+from services.recovery.verification_engine import (
+    build_shadow_verification_plan,
+    run_verification,
+)
 
 
 def _incident_class_hint() -> ObservationBundle:
@@ -33,6 +36,9 @@ def _approved_action(action_type: str, *, namespace: str = "default", name: str 
     parameters = {"namespace": namespace}
     if action_type in {"rollout_undo_deployment", "rollout_restart_deployment"}:
         parameters["deployment"] = name
+    elif action_type == "scale_deployment":
+        parameters["deployment"] = name
+        parameters["replicas"] = 2
     elif action_type in {"delete_stresschaos", "delete_networkchaos"}:
         parameters["name"] = name
     elif action_type == "escalate":
@@ -53,6 +59,8 @@ def _synthesis_output(action_type: str, *, namespace: str = "default", name: str
     operation_family = "rollout.undo_deployment"
     if action_type == "rollout_restart_deployment":
         operation_family = "rollout.restart_deployment"
+    elif action_type == "scale_deployment":
+        operation_family = "scale.deployment"
     elif action_type == "delete_stresschaos":
         operation_family = "chaos.delete_stresschaos"
         target_kind = "StressChaos"
@@ -271,6 +279,27 @@ class VerificationEngineTest(unittest.TestCase):
                 {"post_check_crashloop": {"ready_count": 1.0, "crashloop_count": 0.0}},
             ),
             (
+                "prometheus_ready_count_at_least",
+                VerificationPlan(
+                    verification_id="verify-3b",
+                    action_id="action-3b",
+                    action_type="scale_deployment",
+                    target=ResourceTarget(namespace="default", kind="Deployment", name="frontend"),
+                    summary="Verify scaled readiness target.",
+                    checks=[
+                        VerificationCheck(
+                            check_id="check-3b",
+                            check_type="prometheus_ready_count_at_least",
+                            summary="Ready count target",
+                            parameters={"namespace": "default", "deployment": "frontend", "min_ready_count": 2},
+                        )
+                    ],
+                    warnings=[],
+                ),
+                {},
+                {"post_check_deployment_readiness_target": {"ready_count": 2.0, "min_ready_count": 2}},
+            ),
+            (
                 "prometheus_crashloop_zero",
                 VerificationPlan(
                     verification_id="verify-4",
@@ -370,6 +399,24 @@ class VerificationEngineTest(unittest.TestCase):
 
                 self.assertEqual(result.status, "passed")
                 self.assertTrue(result.check_results[0].passed)
+
+    def test_build_shadow_verification_plan_supports_scale_deployment(self) -> None:
+        approved_action = _approved_action("scale_deployment", name="frontend")
+        plan = build_shadow_verification_plan(
+            approved_action,
+            _synthesis_output("scale_deployment", name="frontend"),
+            _incident_class_hint(),
+        )
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(
+            [check.check_type for check in plan.checks],
+            [
+                "kubernetes_rollout_status",
+                "prometheus_ready_count_at_least",
+            ],
+        )
 
 
 if __name__ == "__main__":

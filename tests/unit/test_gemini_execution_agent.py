@@ -171,6 +171,121 @@ class GeminiExecutionAgentTest(unittest.TestCase):
         self.assertEqual(status, "failed")
         self.assertIn("disallowed tool", summary)
 
+    def test_agent_uses_approved_dispatch_parameters_for_mutation_tools(self) -> None:
+        observed_arguments: list[dict[str, object]] = []
+
+        def delete_stresschaos(**kwargs: object) -> dict[str, object]:
+            observed_arguments.append(dict(kwargs))
+            return {
+                "status": "succeeded",
+                "returncode": 0,
+                "stdout": 'stresschaos.chaos-mesh.org "frontend-cpu-saturation" deleted\n',
+                "stderr": "",
+                "command": [
+                    "kubectl",
+                    "delete",
+                    "stresschaos",
+                    "frontend-cpu-saturation",
+                    "-n",
+                    "default",
+                ],
+            }
+
+        tools = dict(_tools())
+        tools["delete_stresschaos"] = ExecutionTool(
+            name="delete_stresschaos",
+            description="delete stresschaos",
+            callable=delete_stresschaos,
+            mutation=True,
+        )
+        dispatch = ExecutionDispatch(
+            incident_id="incident-456",
+            action_id="delete_frontend_cpu_stresschaos",
+            action_type="delete_stresschaos",
+            parameters={"namespace": "default", "name": "frontend-cpu-saturation"},
+            worker_id="worker-456",
+            requested_at="2026-03-27T03:00:00+00:00",
+            allowed_tool_names=["get_stresschaos", "delete_stresschaos"],
+            max_steps=3,
+        )
+        agent = GeminiExecutionAgent(
+            llm=_FakeExecutionAgentLLM(
+                [
+                    ExecutionAgentDecision(
+                        decision_type="tool_call",
+                        tool_name="delete_stresschaos",
+                        arguments={},
+                        status="failed",
+                        summary="Delete the approved CPU saturation chaos object.",
+                    ),
+                    ExecutionAgentDecision(
+                        decision_type="finish",
+                        tool_name="",
+                        arguments={},
+                        status="succeeded",
+                        summary="Deleted the active CPU saturation chaos object successfully.",
+                    ),
+                ]
+            )
+        )
+
+        status, summary, *_ = agent.run(dispatch=dispatch, tools=tools)
+
+        self.assertEqual(status, "succeeded")
+        self.assertEqual(summary, "Deleted the active CPU saturation chaos object successfully.")
+        self.assertEqual(
+            observed_arguments,
+            [{"namespace": "default", "name": "frontend-cpu-saturation"}],
+        )
+
+    def test_agent_uses_approved_dispatch_parameters_for_readonly_tools(self) -> None:
+        observed_arguments: list[dict[str, object]] = []
+
+        def get_rollout_status(**kwargs: object) -> dict[str, object]:
+            observed_arguments.append(dict(kwargs))
+            return {
+                "status": "succeeded",
+                "returncode": 0,
+                "stdout": 'deployment "cartservice" successfully rolled out',
+                "stderr": "",
+                "command": ["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default"],
+            }
+
+        tools = dict(_tools())
+        tools["get_rollout_status"] = ExecutionTool(
+            name="get_rollout_status",
+            description="rollout status",
+            callable=get_rollout_status,
+            mutation=False,
+        )
+        agent = GeminiExecutionAgent(
+            llm=_FakeExecutionAgentLLM(
+                [
+                    ExecutionAgentDecision(
+                        decision_type="tool_call",
+                        tool_name="get_rollout_status",
+                        arguments={},
+                        status="failed",
+                        summary="Inspect rollout health.",
+                    ),
+                    ExecutionAgentDecision(
+                        decision_type="finish",
+                        tool_name="",
+                        arguments={},
+                        status="failed",
+                        summary="Stopping after inspection.",
+                    ),
+                ]
+            )
+        )
+
+        agent.run(dispatch=_dispatch(), tools=tools)
+
+        self.assertEqual(
+            observed_arguments,
+            [{"namespace": "default", "deployment": "cartservice"}],
+        )
+
     def test_agent_fails_when_model_does_not_finish_within_max_steps(self) -> None:
         agent = GeminiExecutionAgent(
             llm=_FakeExecutionAgentLLM(

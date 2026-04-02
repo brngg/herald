@@ -8,7 +8,7 @@ from schemas.execution_plan import SynthesisOutput
 from schemas.incident import Incident
 from schemas.intents import ReasonerOutput
 from schemas.observations import ObservationBundle
-from services.intent_synthesizer import compile_shadow_dispatches, synthesize_execution_plans
+from services.recovery.intent_synthesizer import compile_shadow_dispatches, synthesize_execution_plans
 
 
 class SynthesizerAgentState(TypedDict):

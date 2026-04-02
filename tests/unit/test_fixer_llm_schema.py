@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from services.fixer_llm import build_fixer_prompts, parse_fixer_llm_result
+from services.llm.tasks.fixer_contract import build_fixer_prompts, parse_fixer_llm_result
 
 
 class FixerLLMSchemaTest(unittest.TestCase):

@@ -14,7 +14,7 @@ from agents.fixer import (
     run_fixer_pipeline,
 )
 from schemas.incident import Incident
-from services.fixer_llm import FixerLLMResult
+from services.llm.tasks.fixer_contract import FixerLLMResult
 from tests.unit.test_alertmanager_ingest import _sample_payload
 
 

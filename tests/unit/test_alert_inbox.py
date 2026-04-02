@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 
-from services.alert_inbox import (
+from services.alerts.inbox import (
     claim_inbox_record,
     list_actionable_inbox_records,
     load_inbox_record,

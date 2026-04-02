@@ -6,10 +6,10 @@ import tempfile
 import textwrap
 import unittest
 
-from services.alert_inbox import load_inbox_record, store_pending_alerts
-from services.execution_worker import ExecutionWorkerClient
-from services.kubernetes_client import KubernetesClient
-from services.prometheus_client import PrometheusClient
+from services.alerts.inbox import load_inbox_record, store_pending_alerts
+from services.infra.kubernetes.execution_worker import ExecutionWorkerClient
+from services.infra.kubernetes.client import KubernetesClient
+from services.observability.prometheus import PrometheusClient
 from workflows.operator_inbox import (
     ignore_inbox_artifact,
     run_terminal_inbox_flow,
@@ -154,6 +154,8 @@ class OperatorInboxIntegrationTest(unittest.TestCase):
             self.assertEqual(reloaded.status, "pending_execution_approval")
             self.assertIsNotNone(reloaded.first_pass_artifact)
             self.assertIsNone(reloaded.final_result_artifact)
+            self.assertEqual(planning_result["engine_mode"], "v2_execute")
+            self.assertEqual(planning_result["decision_trace_timeline"][0]["node_name"], "observe")
             self.assertEqual(planning_result["decision_trace"].final_state, "pending_approval")
             self.assertEqual(planning_result["decision_trace"].execution_result, {})
 
@@ -208,7 +210,7 @@ class OperatorInboxIntegrationTest(unittest.TestCase):
                     store_pending_alerts(_crashloop_payload(), inbox_root=tmpdir)
                     output_lines: list[str] = []
 
-                    crashloop_queries = iter([1.0, 0.0])
+                    crashloop_queries = iter([1.0, 1.0, 0.0, 0.0])
 
                     def query_runner(query: str) -> float:
                         if "kube_pod_container_status_waiting_reason" in query:
@@ -245,6 +247,7 @@ class OperatorInboxIntegrationTest(unittest.TestCase):
                     self.assertIsNotNone(artifact.final_result_artifact)
 
                     final_result = result["final_result"]
+                    self.assertEqual(final_result["engine_mode"], "v2_execute")
                     self.assertEqual(
                         final_result["decision_trace"].human_approval,
                         expected_approval,
@@ -264,14 +267,20 @@ class OperatorInboxIntegrationTest(unittest.TestCase):
                             final_result["decision_trace"].execution_result["status"],
                             "not_executed",
                         )
-                        self.assertEqual(commands, [])
+                        self.assertFalse(
+                            any(
+                                command[:3] == ["kubectl", "rollout", "undo"]
+                                or command[:3] == ["kubectl", "rollout", "status"]
+                                for command in commands
+                            )
+                        )
 
     def test_watch_mode_processes_new_pending_alert(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store_pending_alerts(_crashloop_payload(), inbox_root=tmpdir)
             output_lines: list[str] = []
 
-            crashloop_queries = iter([1.0, 0.0])
+            crashloop_queries = iter([1.0, 1.0, 0.0, 0.0, 0.0])
 
             def query_runner(query: str) -> float:
                 if "kube_pod_container_status_waiting_reason" in query:
@@ -348,7 +357,7 @@ class OperatorInboxIntegrationTest(unittest.TestCase):
                 handle.write("{}\n")
 
             output_lines: list[str] = []
-            crashloop_queries = iter([1.0, 0.0])
+            crashloop_queries = iter([1.0, 1.0, 0.0, 0.0, 0.0])
 
             def query_runner(query: str) -> float:
                 if "kube_pod_container_status_waiting_reason" in query:

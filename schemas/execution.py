@@ -7,6 +7,7 @@ from typing import Any, Literal
 ExecutionActionType = Literal[
     "rollout_undo_deployment",
     "rollout_restart_deployment",
+    "scale_deployment",
     "delete_stresschaos",
     "delete_networkchaos",
 ]
@@ -18,6 +19,7 @@ ExecutionToolName = Literal[
     "get_networkchaos",
     "rollout_undo_deployment",
     "rollout_restart_deployment",
+    "scale_deployment",
     "delete_stresschaos",
     "delete_networkchaos",
 ]
@@ -25,6 +27,7 @@ ExecutionToolName = Literal[
 VALID_EXECUTION_ACTION_TYPES: tuple[ExecutionActionType, ...] = (
     "rollout_undo_deployment",
     "rollout_restart_deployment",
+    "scale_deployment",
     "delete_stresschaos",
     "delete_networkchaos",
 )
@@ -36,6 +39,7 @@ VALID_EXECUTION_TOOL_NAMES: tuple[ExecutionToolName, ...] = (
     "get_networkchaos",
     "rollout_undo_deployment",
     "rollout_restart_deployment",
+    "scale_deployment",
     "delete_stresschaos",
     "delete_networkchaos",
 )
@@ -149,6 +153,20 @@ def _require_rollout_parameters(
     parameters: dict[str, Any],
     action_type: ExecutionActionType,
 ) -> None:
+    if action_type == "scale_deployment":
+        for key in ("namespace", "deployment"):
+            value = parameters.get(key)
+            if not isinstance(value, str):
+                raise TypeError(f"{action_type} parameters must include string {key!r}")
+            if not value:
+                raise ValueError(f"{action_type} parameters must include non-empty {key!r}")
+        replicas = parameters.get("replicas")
+        if not isinstance(replicas, int) or isinstance(replicas, bool):
+            raise TypeError(f"{action_type} parameters must include integer 'replicas'")
+        if replicas <= 0:
+            raise ValueError(f"{action_type} parameters must include replicas > 0")
+        return
+
     if action_type in {"delete_stresschaos", "delete_networkchaos"}:
         for key in ("namespace", "name"):
             value = parameters.get(key)

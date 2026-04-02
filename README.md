@@ -96,12 +96,10 @@ runs `observe -> reason -> critique -> synthesize` before bounded v1 planning, a
 then records shadow `verify -> replan` follow-up analysis after the real v1 execution
 path finishes. Execution behavior stays unchanged while the new substrate is validated.
 
-A first Phase 6 cutover is also in place behind `engine_mode=v2_execute`.
-Today that pilot makes four bounded actions execute from the Synthesizer plan:
-`delete_stresschaos` for CPU saturation, `delete_networkchaos` for the
-network-partition slice, the bad-config `rollout_undo_deployment` path for
-`frontend`, and the crashloop `rollout_undo_deployment` path for `cartservice`.
-Other live paths still fall back to v1.
+`engine_mode=v2_execute` is now the default for the CLI, terminal inbox, and replay
+runner. In that mode, the supported benchmark slices execute from exact
+Synthesizer-produced `ExecutionPlan` candidates instead of the old hardcoded
+v1 executor mapping, while `engine_mode=v1` remains available as a compatibility path.
 
 ### Future Direction: Derived Mutation Plans
 
@@ -143,6 +141,43 @@ mutation plan it asks the operator to approve.
 | LLM evaluation and tracing | Langfuse |
 | Human approval | Slack API |
 | Infrastructure | Kubernetes on minikube |
+
+---
+
+## Runtime Layout
+
+The codebase is now organized around capability boundaries instead of a flat
+`services/` directory:
+
+- `services/llm/` holds provider transports plus task-specific LLM adapters
+- `services/recovery/` holds capability catalogs, synthesis, policy, and verification
+- `services/infra/kubernetes/` holds typed Kubernetes access and the execution worker
+- `services/observability/` holds Prometheus access and cluster observation helpers
+- `services/alerts/` holds Alertmanager ingestion and the filesystem inbox
+- `services/normalization/` and `services/runtime/` hold smaller shared runtime helpers
+
+This keeps the workflow and agent layers focused on orchestration while the platform
+interfaces stay typed and testable.
+
+## Cluster and Metrics Access
+
+HERALD does not rely on unrestricted shell access as its normal control surface.
+Instead, the agents use typed tool wrappers backed by Kubernetes and Prometheus:
+
+- `services/infra/kubernetes/client.py` exposes read and bounded write operations
+- `services/observability/prometheus.py` exposes pre-check and post-check metric queries
+- `services/observability/cluster_observer.py` builds compact observation summaries for
+  the Reasoner
+
+In local development this means HERALD needs:
+
+- a working `kubectl` context pointed at the target cluster
+- Kubernetes RBAC that allows the read and bounded write operations you want HERALD to use
+- a reachable Prometheus base URL for verification and incident signals
+
+The long-term model is: broad read access through typed observation tools, narrow
+mutation access through bounded execution tools, and exact-plan approval before any
+write action executes.
 
 ---
 
@@ -194,14 +229,15 @@ Current implementation is strongest in:
 - a bounded network-partition recovery slice for `frontend -> cartservice`, including approval-gated NetworkChaos deletion and verification
 - a partially live-exercised network-partition operator path that safely skipped execution when the incident signal had already cleared
 - a HERALD 2.0 shadow path behind `engine_mode=v2_shadow`, including typed observation bundles, a read-only cluster observer, a shadow Reasoner with typed intents, a policy Critic, a bounded Synthesizer/compiler, post-execution shadow verification, and bounded shadow replanning
-- a Phase 6 `v2_execute` pilot for the bounded chaos-delete families plus the rollback paths, where the approved CPU-saturation, network-partition, bad-config, and crashloop rollback actions now dispatch from the Synthesizer plan instead of the v1 hardcoded execution mapping
+- the default `v2_execute` path for the bounded chaos-delete families plus the rollback paths, where the approved CPU-saturation, network-partition, bad-config, and crashloop rollback actions now dispatch from the Synthesizer plan instead of the old hardcoded execution mapping
+- a live-validated post-refactor crashloop recovery run on the default `v2_execute` path, including exact-plan approval and `v2_execution_plan` dispatch
 - replay artifacts and metrics for crashloop, CPU saturation, bad-config, and network-partition scenarios
 
 Still not implemented end to end:
 
 - durable workflow orchestration
 - Slack-based approval flow
-- full `v2_execute` cutover where Synthesizer-driven plans replace class-based v1 routing and execution beyond the current delete-and-rollback pilot
+- full retirement of the remaining v1 compatibility scaffolding and action-shaped artifact readers
 - a provider-backed replanning layer and true bounded multi-attempt `verify -> replan` loop on the v2 path
 
 Progress by phase:
@@ -257,7 +293,7 @@ The v1 inbox statuses are:
 Start the local webhook receiver:
 
 ```bash
-./.venv/bin/uvicorn services.alert_inbox_service:app --host 0.0.0.0 --port 8080
+./.venv/bin/uvicorn services.alerts.inbox_service:app --host 0.0.0.0 --port 8080
 ```
 
 Send an Alertmanager payload to it:
@@ -288,15 +324,14 @@ The watcher will:
 - prompt `1 = investigate` or `2 = ignore`
 - if investigated, run planning and then prompt `1 = approve execution` or `2 = reject`
 
+The watcher now defaults to `--engine-mode v2_execute`.
 Add `--engine-mode v2_shadow` if you want the watcher to collect live observation
 context plus shadow Reasoner, Critic, and Synthesizer output before bounded v1
 planning, then attach shadow verifier and replanner results after any real bounded
 execution without changing execution behavior.
 
-For the current Phase 6 pilot, `--engine-mode v2_execute` makes the chaos-delete
-actions for the CPU saturation and network-partition slices, plus the bad-config
-and crashloop rollback paths, execute from the Synthesizer plan. Other actions
-still route through the bounded v1 execution path in that mode.
+`--engine-mode v1` is still accepted if you need the old action-based corridor
+for comparison or compatibility testing.
 
 ### Run the One-Shot Terminal Inbox Flow
 
@@ -317,13 +352,10 @@ The one-shot flow will:
 Gate 0 investigation approval does not authorize execution by itself. The second execution
 approval gate remains required exactly as before.
 
-You can also pass `--engine-mode v2_shadow` here to exercise the new shadow
-pipeline while keeping the v1 execution corridor authoritative.
-
-`--engine-mode v2_execute` is now partially live: the CPU saturation and
-network-partition slices use the Synthesizer plan for execution, and the
-bad-config plus crashloop rollback paths do too, while the crashloop restart
-path still falls back to v1.
+You can also pass `--engine-mode v2_shadow` here to exercise the shadow-only
+observe-to-replan loop while keeping the compatibility executor authoritative.
+Pass `--engine-mode v1` only when you specifically want to compare against the
+legacy action-based path.
 
 ---
 
@@ -420,7 +452,7 @@ The current live demo has been validated end to end on minikube:
 - apply the intentional bad deploy
 - wait for `cartservice` to enter `CrashLoopBackOff`
 - run the first HERALD pass to reach `pending_approval`
-- approve `rollout_undo_cartservice`
+- approve `reasoner-rollout-undo-cartservice`
 - let the spawned Gemini execution agent execute the approved rollback
 - watch the spawned worker report its lifecycle and tool calls live in the terminal
 - wait for rollout completion and verify recovery
@@ -536,26 +568,25 @@ To exercise the HERALD 2.0 shadow path without changing execution behavior, add
 in the result, and store nested shadow output under
 `decision_trace.fixer_plan["v2_shadow"]` before handing off to the bounded v1 planner.
 If you later approve from that saved first pass, the resumed run will append shadow
-`verifier_state` and bounded `replanner_state` after the real v1 execution outcome.
+`verifier_state` and bounded `replanner_state` after the real execution outcome.
 
-To exercise the current Phase 6 cutover, use `--engine-mode v2_execute`. In that
-mode the approved chaos-delete actions for CPU saturation and network partition,
-plus the bad-config and crashloop rollback paths, dispatch from the Synthesizer
-plan, while the crashloop restart path still falls back to the bounded v1
-executor path.
+The CLI now defaults to `--engine-mode v2_execute`. In that mode the saved first
+pass is candidate-based: HITL approval is attached to an exact execution plan
+candidate instead of a v1 remediation action id.
 
 What to look for:
 
 - `hitl_decision.routing_decision`
-- `hitl_decision.recommended_action`
+- `hitl_decision.recommended_candidate`
 - `decision_trace.human_approval` should be `n/a`
 - `decision_trace.final_state` should be `pending_approval`
 
 ### Step 2: Run With Explicit Approval
 
-Copy the `action_id` from `hitl_decision.recommended_action` in the first run and
-pass it back with `--approve-action-id`. On the default heuristic path, the
-recommended action is typically `rollout_undo_cartservice`.
+Copy the `candidate_id` from `hitl_decision.recommended_candidate` in the first run
+and pass it back with `--approve-action-id`. On the default heuristic path, the
+recommended candidate for the crashloop benchmark is typically
+`reasoner-rollout-undo-cartservice`.
 
 The recommended approval flow resumes from the saved first-pass artifact so the
 second command does not rerun Fixer or Judge. This second run approves the
@@ -565,7 +596,7 @@ selected action and allows the workflow to execute the bounded crashloop remedia
 ./.venv/bin/python -m workflows.recovery_workflow \
   --payload-file payloads/crashloop_alert.json \
   --resume-from-file /tmp/herald-first-pass.json \
-  --approve-action-id rollout_undo_cartservice \
+  --approve-action-id reasoner-rollout-undo-cartservice \
   --prometheus-base-url http://localhost:9090
 ```
 
@@ -595,7 +626,7 @@ If you want to exercise the human rejection path instead of executing the action
 ./.venv/bin/python -m workflows.recovery_workflow \
   --payload-file payloads/crashloop_alert.json \
   --resume-from-file /tmp/herald-first-pass.json \
-  --reject-action-id rollout_undo_cartservice \
+  --reject-action-id reasoner-rollout-undo-cartservice \
   --prometheus-base-url http://localhost:9090
 ```
 
@@ -640,9 +671,10 @@ You can also override models explicitly:
   --judge-model gemini-2.5-flash
 ```
 
-When using Gemini, action ordering, scores, and `action_id` values can vary. Run
-the workflow once without approval, copy the recommended `action_id`, then resume
-from that saved artifact for approval so Fixer and Judge are not called twice.
+When using Gemini, candidate ordering, scores, and `candidate_id` values can vary.
+Run the workflow once without approval, copy the recommended `candidate_id`, then
+resume from that saved artifact for approval so the planning stack is not called
+twice.
 
 Gemini no-rerun approval flow:
 
@@ -655,13 +687,13 @@ Gemini no-rerun approval flow:
 ```
 
 ```bash
-ACTION_ID="$(jq -r '.hitl_decision.recommended_action.action_id' /tmp/herald-first-pass.json)"
+CANDIDATE_ID="$(jq -r '.hitl_decision.recommended_candidate.candidate_id' /tmp/herald-first-pass.json)"
 
 ./.venv/bin/python -m workflows.recovery_workflow \
   --payload-file payloads/crashloop_alert.json \
   --prometheus-base-url http://localhost:9090 \
   --resume-from-file /tmp/herald-first-pass.json \
-  --approve-action-id "$ACTION_ID" | tee /tmp/herald-approval-run.json
+  --approve-action-id "$CANDIDATE_ID" | tee /tmp/herald-approval-run.json
 ```
 
 Gemini Fixer -> Gemini Judge:
@@ -673,8 +705,8 @@ export GEMINI_API_KEY=your_key_here
 import json
 from agents.fixer import run_fixer_for_alertmanager_payload
 from agents.judge import run_judge_pipeline
-from services.gemini_fixer_llm import GeminiFixerLLM
-from services.gemini_judge_llm import GeminiJudgeLLM
+from services.llm.tasks.fixer import GeminiFixerLLM
+from services.llm.tasks.judge import GeminiJudgeLLM
 
 with open('/tmp/herald-crashloop-payload.json', 'r', encoding='utf-8') as f:
     payload = json.load(f)

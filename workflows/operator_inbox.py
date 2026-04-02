@@ -10,7 +10,7 @@ from time import sleep
 from typing import Any
 from uuid import uuid4
 
-from services.alert_inbox import (
+from services.alerts.inbox import (
     InboxArtifactRecord,
     claim_inbox_record,
     list_actionable_inbox_records,
@@ -19,14 +19,15 @@ from services.alert_inbox import (
     save_workflow_artifact,
     update_inbox_record,
 )
-from services.gemini_fixer_llm import GeminiFixerLLM
-from services.gemini_critic_llm import GeminiCriticLLM
-from services.gemini_judge_llm import GeminiJudgeLLM
-from services.gemini_reasoner_llm import GeminiReasonerLLM
-from services.kubernetes_client import KubernetesClient
-from services.prometheus_client import PrometheusClient
-from services.execution_worker import ExecutionWorkerClient
+from services.llm.tasks.fixer import GeminiFixerLLM
+from services.llm.tasks.critic import GeminiCriticLLM
+from services.llm.tasks.judge import GeminiJudgeLLM
+from services.llm.tasks.reasoner import GeminiReasonerLLM
+from services.infra.kubernetes.client import KubernetesClient
+from services.observability.prometheus import PrometheusClient
+from services.infra.kubernetes.execution_worker import ExecutionWorkerClient
 from workflows.recovery_workflow import (
+    DEFAULT_ENGINE_MODE,
     EngineMode,
     VALID_ENGINE_MODES,
     _continue_with_interactive_hitl,
@@ -49,7 +50,7 @@ def ignore_inbox_artifact(artifact_dir: str) -> InboxArtifactRecord:
 def start_investigation_for_artifact(
     artifact_dir: str,
     *,
-    engine_mode: EngineMode | str = "v1",
+    engine_mode: EngineMode | str = DEFAULT_ENGINE_MODE,
     fixer_llm: Any = None,
     judge_llm: Any = None,
     reasoner_llm: Any = None,
@@ -143,7 +144,7 @@ def continue_execution_approval_for_artifact(
 def run_terminal_inbox_flow(
     *,
     inbox_root: str | None = None,
-    engine_mode: EngineMode | str = "v1",
+    engine_mode: EngineMode | str = DEFAULT_ENGINE_MODE,
     fixer_llm: Any = None,
     judge_llm: Any = None,
     reasoner_llm: Any = None,
@@ -202,7 +203,7 @@ def run_terminal_inbox_flow(
 def run_terminal_inbox_watch(
     *,
     inbox_root: str | None = None,
-    engine_mode: EngineMode | str = "v1",
+    engine_mode: EngineMode | str = DEFAULT_ENGINE_MODE,
     fixer_llm: Any = None,
     judge_llm: Any = None,
     reasoner_llm: Any = None,
@@ -272,7 +273,7 @@ def run_terminal_inbox_watch(
 def _handle_claimed_record(
     record: InboxArtifactRecord,
     *,
-    engine_mode: EngineMode | str = "v1",
+    engine_mode: EngineMode | str = DEFAULT_ENGINE_MODE,
     fixer_llm: Any = None,
     judge_llm: Any = None,
     reasoner_llm: Any = None,
@@ -454,7 +455,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--engine-mode",
         choices=VALID_ENGINE_MODES,
-        default="v1",
+        default=DEFAULT_ENGINE_MODE,
     )
     return parser
 

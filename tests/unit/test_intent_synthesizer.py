@@ -4,7 +4,10 @@ import unittest
 
 from schemas.critic import CriticOutput, CritiqueCandidate, PolicyCheckResult
 from schemas.intents import OperationIntent, ReasonerOutput, ResourceTarget
-from services.intent_synthesizer import compile_shadow_dispatches, synthesize_execution_plans
+from services.recovery.intent_synthesizer import (
+    compile_shadow_dispatches,
+    synthesize_execution_plans,
+)
 
 
 class IntentSynthesizerTest(unittest.TestCase):

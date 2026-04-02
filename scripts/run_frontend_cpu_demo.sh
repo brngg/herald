@@ -133,8 +133,18 @@ import sys
 with open(sys.argv[1], "r", encoding="utf-8") as handle:
     payload = json.load(handle)
 
-action = payload["hitl_decision"]["recommended_action"]
-print(action["action_id"] if action else "")
+hitl_decision = payload["hitl_decision"]
+candidate = hitl_decision.get("recommended_candidate")
+if isinstance(candidate, dict):
+    print(candidate.get("candidate_id", ""))
+    raise SystemExit(0)
+
+action = hitl_decision.get("recommended_action")
+if isinstance(action, dict):
+    print(action.get("action_id", ""))
+    raise SystemExit(0)
+
+print("")
 PY
 )"
 
@@ -143,11 +153,11 @@ echo "Saved first-pass output to ${PLAN_OUTPUT}"
 echo "Artifacts directory: ${ARTIFACT_DIR}"
 
 if [[ -z "${ACTION_ID}" ]]; then
-  echo "No recommended action was returned. Inspect ${PLAN_OUTPUT} for details."
+  echo "No recommended approval target was returned. Inspect ${PLAN_OUTPUT} for details."
   exit 0
 fi
 
-echo "Recommended action_id: ${ACTION_ID}"
+echo "Recommended approval id: ${ACTION_ID}"
 echo
 
 if [[ "${DECISION_MODE}" == "prompt" ]]; then

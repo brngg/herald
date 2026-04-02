@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 import unittest
 
-from services.kubernetes_client import KubernetesClient
+from services.infra.kubernetes.client import KubernetesClient
 
 
 class KubernetesClientTest(unittest.TestCase):
@@ -78,6 +78,28 @@ class KubernetesClientTest(unittest.TestCase):
         self.assertEqual(
             commands,
             [["kubectl", "delete", "stresschaos", "frontend-cpu-saturation", "-n", "default"]],
+        )
+
+    def test_scale_deployment_uses_expected_command(self) -> None:
+        commands: list[list[str]] = []
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout='deployment.apps/frontend scaled\n',
+                stderr="",
+            )
+
+        client = KubernetesClient(runner=runner)
+
+        result = client.scale_deployment(namespace="default", deployment="frontend", replicas=2)
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(
+            commands,
+            [["kubectl", "scale", "deployment/frontend", "-n", "default", "--replicas=2"]],
         )
 
     def test_delete_networkchaos_uses_expected_command(self) -> None:

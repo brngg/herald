@@ -47,8 +47,9 @@ class RunScenarioIntegrationTest(unittest.TestCase):
             self.assertTrue((Path(temp_dir) / "metrics-summary.md").exists())
             with (Path(temp_dir) / "crashloop_recovered-run-01.json").open("r", encoding="utf-8") as handle:
                 artifact = json.load(handle)
+            self.assertEqual(artifact["result"]["engine_mode"], "v2_execute")
             self.assertIn("decision_trace_timeline", artifact["result"])
-            self.assertEqual(artifact["result"]["decision_trace_timeline"][0]["node_name"], "fixer")
+            self.assertEqual(artifact["result"]["decision_trace_timeline"][0]["node_name"], "observe")
 
 
 if __name__ == "__main__":

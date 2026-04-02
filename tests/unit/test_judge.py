@@ -6,7 +6,7 @@ import unittest
 from agents.judge import run_judge_pipeline
 from schemas.incident import Incident
 from schemas.remediation import RemediationAction
-from services.judge_llm import JudgeLLMResult
+from services.llm.tasks.judge_contract import JudgeLLMResult
 
 
 def _crashloop_incident() -> Incident:

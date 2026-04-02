@@ -7,7 +7,7 @@ from unittest.mock import patch
 from schemas.critic import CriticOutput
 from schemas.intents import CapabilityCatalog, OperationIntent, ReasonerOutput, ResourceTarget
 from schemas.observations import ObservationBundle
-from services.gemini_critic_llm import (
+from services.llm.tasks.critic import (
     _build_generate_content_request,
     _extract_response_text,
     _get_gemini_api_key,

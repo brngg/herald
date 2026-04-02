@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import io
+import os
 import subprocess
 import sys
 import textwrap
 import unittest
 
 from schemas.execution import ExecutionDispatch
-from services.execution_worker import ExecutionWorkerClient, execute_dispatch
+from services.infra.kubernetes.execution_worker import (
+    ExecutionWorkerClient,
+    _default_worker_cwd,
+    _merged_env,
+    execute_dispatch,
+)
 from services.gemini_execution_agent import ExecutionAgentDecision, ExecutionAgentLLM
-from services.kubernetes_client import KubernetesClient
+from services.infra.kubernetes.client import KubernetesClient
 
 
 class _FakeExecutionAgentLLM(ExecutionAgentLLM):
@@ -33,6 +39,15 @@ class _FakeExecutionAgentLLM(ExecutionAgentLLM):
 
 
 class ExecutionWorkerTest(unittest.TestCase):
+    def test_worker_subprocess_defaults_include_repo_root(self) -> None:
+        cwd = _default_worker_cwd()
+        env = _merged_env(None)
+
+        self.assertTrue(cwd.endswith("/Users/bcheng/Projects/herald"))
+        pythonpath = env.get("PYTHONPATH", "")
+        self.assertTrue(pythonpath)
+        self.assertEqual(pythonpath.split(os.pathsep)[0], cwd)
+
     def test_execute_dispatch_runs_gemini_agent_loop_for_bounded_action(self) -> None:
         commands: list[list[str]] = []
 
@@ -262,6 +277,77 @@ class ExecutionWorkerTest(unittest.TestCase):
             [
                 ["kubectl", "get", "stresschaos", "frontend-cpu-saturation", "-n", "default", "-o", "json"],
                 ["kubectl", "delete", "stresschaos", "frontend-cpu-saturation", "-n", "default"],
+            ],
+        )
+
+    def test_execute_dispatch_supports_scale_deployment(self) -> None:
+        commands: list[list[str]] = []
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            if command[:3] == ["kubectl", "get", "deployment"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout='{"metadata":{"name":"frontend"}}',
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout='deployment.apps/frontend scaled\n',
+                stderr="",
+            )
+
+        dispatch = ExecutionDispatch(
+            incident_id="incident-789",
+            action_id="scale_frontend_2",
+            action_type="scale_deployment",
+            parameters={"namespace": "default", "deployment": "frontend", "replicas": 2},
+            worker_id="worker-789",
+            requested_at="2026-03-27T03:00:00+00:00",
+            allowed_tool_names=["get_deployment_context", "get_rollout_status", "scale_deployment"],
+            max_steps=3,
+        )
+        llm = _FakeExecutionAgentLLM(
+            [
+                ExecutionAgentDecision(
+                    decision_type="tool_call",
+                    tool_name="get_deployment_context",
+                    arguments={"namespace": "default", "deployment": "frontend"},
+                    status="failed",
+                    summary="Inspect the deployment before scaling.",
+                ),
+                ExecutionAgentDecision(
+                    decision_type="tool_call",
+                    tool_name="scale_deployment",
+                    arguments={"replicas": 99},
+                    status="failed",
+                    summary="Scale the approved deployment to the bounded replica target.",
+                ),
+                ExecutionAgentDecision(
+                    decision_type="finish",
+                    tool_name="",
+                    arguments={},
+                    status="succeeded",
+                    summary="Scaled the approved deployment successfully.",
+                ),
+            ]
+        )
+
+        result = execute_dispatch(
+            dispatch,
+            kubernetes_client=KubernetesClient(runner=runner),
+            llm=llm,
+        )
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.tool_transcript[1]["tool_name"], "scale_deployment")
+        self.assertEqual(
+            commands,
+            [
+                ["kubectl", "get", "deployment", "frontend", "-n", "default", "-o", "json"],
+                ["kubectl", "scale", "deployment/frontend", "-n", "default", "--replicas=2"],
             ],
         )
 

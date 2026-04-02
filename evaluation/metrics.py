@@ -113,10 +113,24 @@ def render_metrics_markdown(metrics: dict[str, Any]) -> str:
 
 def _candidate_action_ids(result: dict[str, Any]) -> list[str]:
     action_ids: list[str] = []
-    for action in result["hitl_decision"]["candidate_actions"]:
-        action_id = action.get("action_id")
-        if isinstance(action_id, str):
-            action_ids.append(action_id)
+    hitl_decision = result["hitl_decision"]
+    if "candidate_actions" in hitl_decision:
+        for action in hitl_decision["candidate_actions"]:
+            action_id = action.get("action_id")
+            if isinstance(action_id, str):
+                action_ids.append(action_id)
+        return action_ids
+
+    for candidate in hitl_decision.get("candidate_options", []):
+        legacy_action_hint = candidate.get("legacy_action_hint")
+        if isinstance(legacy_action_hint, dict):
+            action_id = legacy_action_hint.get("action_id")
+            if isinstance(action_id, str):
+                action_ids.append(action_id)
+                continue
+        candidate_id = candidate.get("candidate_id")
+        if isinstance(candidate_id, str):
+            action_ids.append(candidate_id)
     return action_ids
 
 

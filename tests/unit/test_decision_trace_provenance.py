@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from schemas.decision_trace import DecisionTrace
-from services.decision_trace_provenance import (
+from services.runtime.decision_trace import (
     append_node_run,
     derive_trace_timeline,
     get_latest_node_run,

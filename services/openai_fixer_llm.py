@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from services.fixer_llm import (
+from services.llm.tasks.fixer_contract import (
     FixerLLM,
     FixerLLMResult,
     build_fixer_prompts,
@@ -67,4 +67,3 @@ class OpenAIFixerLLM(FixerLLM):
             raise ValueError("OpenAI response JSON must be an object")
 
         return parse_fixer_llm_result(payload)
-

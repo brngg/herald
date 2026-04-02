@@ -56,7 +56,7 @@ cluster state instead of only alert labels. v1 remains the default execution pat
     - `range_query(...)`
     - raw metric snapshot helpers
   - Keep current slice-specific pre/post-checks intact
-- `services/alertmanager_client.py`
+- `services/alerts/alertmanager.py`
   - Preserve the full single-alert payload as the seed for observation
 - `schemas/decision_trace.py`
   - Add node names:

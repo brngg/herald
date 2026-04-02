@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from schemas.intents import OperationIntent, ResourceTarget
-from services.intent_compat import intent_to_v1_remediation
+from services.recovery.intent_compat import intent_to_v1_remediation
 
 
 class IntentCompatTest(unittest.TestCase):
@@ -54,6 +54,28 @@ class IntentCompatTest(unittest.TestCase):
         assert action is not None
         self.assertEqual(action.action_type, "delete_networkchaos")
         self.assertEqual(action.parameters["name"], "frontend-to-cartservice-partition")
+
+    def test_maps_scale_intent_to_v1_remediation(self) -> None:
+        action = intent_to_v1_remediation(
+            OperationIntent(
+                intent_id="intent-3",
+                intent="Scale frontend to two replicas.",
+                operation_family="scale.deployment",
+                target=ResourceTarget(namespace="default", kind="Deployment", name="frontend"),
+                arguments={"replicas": 2},
+                reversible=True,
+                confidence_score=0.7,
+                blast_radius_score=0.25,
+                requires_approval=True,
+                verification_hints={},
+                rollback_hints={},
+            )
+        )
+
+        self.assertIsNotNone(action)
+        assert action is not None
+        self.assertEqual(action.action_type, "scale_deployment")
+        self.assertEqual(action.parameters["replicas"], 2)
 
 
 if __name__ == "__main__":

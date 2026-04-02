@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from services.alertmanager_client import (
+from services.alerts.alertmanager import (
     AlertmanagerParseError,
     incidents_from_alertmanager_payload,
 )

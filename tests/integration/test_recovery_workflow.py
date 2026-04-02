@@ -7,10 +7,10 @@ import unittest
 from dataclasses import replace
 from unittest.mock import patch
 
-from services.execution_worker import ExecutionWorkerClient
-from services.kubernetes_client import KubernetesClient
-from services.judge_llm import JudgeLLMResult
-from services.prometheus_client import PrometheusClient
+from services.infra.kubernetes.execution_worker import ExecutionWorkerClient
+from services.infra.kubernetes.client import KubernetesClient
+from services.llm.tasks.judge_contract import JudgeLLMResult
+from services.observability.prometheus import PrometheusClient
 from schemas.remediation import RemediationAction
 from workflows.recovery_workflow import (
     _continue_with_interactive_hitl,
@@ -246,6 +246,53 @@ def _network_partition_payload() -> dict[str, object]:
     }
 
 
+def _rollout_status_command(deployment: str, namespace: str = "default") -> list[str]:
+    return [
+        "kubectl",
+        "rollout",
+        "status",
+        f"deployment/{deployment}",
+        "-n",
+        namespace,
+        "--timeout=60s",
+    ]
+
+
+def _deployment_get_command(deployment: str, namespace: str = "default") -> list[str]:
+    return [
+        "kubectl",
+        "get",
+        "deployment",
+        deployment,
+        "-n",
+        namespace,
+        "-o",
+        "json",
+    ]
+
+
+def _assert_rollout_status_count(
+    testcase: unittest.TestCase,
+    commands: list[list[str]],
+    *,
+    deployment: str,
+    count: int,
+    namespace: str = "default",
+) -> None:
+    testcase.assertEqual(commands.count(_rollout_status_command(deployment, namespace)), count)
+
+
+def _assert_deployment_probe_count(
+    testcase: unittest.TestCase,
+    commands: list[list[str]],
+    *,
+    deployment: str,
+    count: int,
+    namespace: str = "default",
+) -> None:
+    testcase.assertEqual(commands.count(_deployment_get_command(deployment, namespace)), count)
+
+
 class RecoveryWorkflowIntegrationTest(unittest.TestCase):
     def test_workflow_requires_explicit_approval_before_execution(self) -> None:
         result = run_crashloop_recovery_from_payload(_crashloop_payload())
@@ -459,7 +506,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
                 return 1.0
             raise AssertionError(f"Unexpected query: {query}")
 
-        prometheus = PrometheusClient(query_runner=query_runner)
+        prometheus = PrometheusClient(query_runner=query_runner, sleep_fn=lambda _: None)
         kubernetes = KubernetesClient(runner=runner)
         worker_client = _worker_client()
 
@@ -515,10 +562,8 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
             )
         )
         self.assertEqual(result["decision_trace_timeline"][-1]["node_name"], "finalization")
-        self.assertEqual(
-            commands,
-            [["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"]],
-        )
+        _assert_rollout_status_count(self, commands, deployment="cartservice", count=1)
+        _assert_deployment_probe_count(self, commands, deployment="cartservice", count=4)
 
     def test_workflow_retries_pre_check_before_skipping_execution(self) -> None:
         commands: list[list[str]] = []
@@ -566,10 +611,8 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertTrue(trace.execution_result["worker_id"].startswith("worker-"))
         self.assertEqual(trace.execution_result["tool_transcript"][0]["tool_name"], "rollout_undo_deployment")
         self.assertEqual(trace.final_state, "recovered")
-        self.assertEqual(
-            commands,
-            [["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"]],
-        )
+        _assert_rollout_status_count(self, commands, deployment="cartservice", count=1)
+        _assert_deployment_probe_count(self, commands, deployment="cartservice", count=4)
 
     def test_workflow_can_resume_from_saved_first_pass_without_rerunning_planning(self) -> None:
         planning_result = run_crashloop_recovery_from_payload(_crashloop_payload())
@@ -599,7 +642,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
             planning_result,
             approve_action_id="rollout_undo_cartservice",
             kubernetes_client=KubernetesClient(runner=runner),
-            prometheus_client=PrometheusClient(query_runner=query_runner),
+            prometheus_client=PrometheusClient(query_runner=query_runner, sleep_fn=lambda _: None),
             execution_worker_client=_worker_client(),
         )
 
@@ -608,10 +651,8 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(trace.node_runs_by_node["fixer"]["fixer:0001"]["attempt"], 1)
         self.assertEqual(trace.node_runs_by_node["judge"]["judge:0002"]["attempt"], 1)
         self.assertEqual(result["decision_trace_timeline"][0]["node_name"], "fixer")
-        self.assertEqual(
-            commands,
-            [["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"]],
-        )
+        _assert_rollout_status_count(self, commands, deployment="cartservice", count=1)
+        _assert_deployment_probe_count(self, commands, deployment="cartservice", count=4)
 
     def test_resume_from_saved_plan_preserves_shadow_engine_mode(self) -> None:
         def plan_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -710,7 +751,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         result = _continue_with_interactive_hitl(
             payload=_crashloop_payload(),
             planning_result=planning_result,
-            prometheus_client=PrometheusClient(query_runner=query_runner),
+            prometheus_client=PrometheusClient(query_runner=query_runner, sleep_fn=lambda _: None),
             kubernetes_client=KubernetesClient(runner=runner),
             execution_worker_client=_worker_client(),
             input_fn=lambda _: "1",
@@ -719,10 +760,8 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         trace = result["decision_trace"]
         self.assertEqual(trace.human_approval, "approved")
         self.assertEqual(trace.final_state, "recovered")
-        self.assertEqual(
-            commands,
-            [["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"]],
-        )
+        _assert_rollout_status_count(self, commands, deployment="cartservice", count=1)
+        _assert_deployment_probe_count(self, commands, deployment="cartservice", count=4)
 
     def test_interactive_hitl_choice_rejects_recommended_action(self) -> None:
         planning_result = run_crashloop_recovery_from_payload(_crashloop_payload())
@@ -749,6 +788,39 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
             requires_approval=True,
             parameters={"reason": "Automated remediation should not proceed."},
         )
+        escalate_candidate = {
+            "candidate_id": escalate_action.action_id,
+            "summary": escalate_action.description,
+            "confidence_score": escalate_action.confidence_score,
+            "blast_radius_score": escalate_action.blast_radius_score,
+            "requires_approval": escalate_action.requires_approval,
+            "execution_plan": {
+                "intent_id": escalate_action.action_id,
+                "operation_family": "escalate.human_review",
+                "target": {
+                    "namespace": "default",
+                    "kind": "Incident",
+                    "name": "crashloop123",
+                    "selector": None,
+                },
+                "summary": escalate_action.description,
+                "steps": [],
+                "allowed_tool_names": [],
+                "blast_radius_score": escalate_action.blast_radius_score,
+                "requires_approval": escalate_action.requires_approval,
+                "rollback_outline": {},
+            },
+            "display_labels": ["escalate.human_review", "crashloop123"],
+            "legacy_action_hint": {
+                "action_id": escalate_action.action_id,
+                "action_type": escalate_action.action_type,
+                "description": escalate_action.description,
+                "confidence_score": escalate_action.confidence_score,
+                "blast_radius_score": escalate_action.blast_radius_score,
+                "requires_approval": escalate_action.requires_approval,
+                "parameters": escalate_action.parameters,
+            },
+        }
         planning_result["hitl_decision"]["recommended_action"] = escalate_action
         planning_result["hitl_decision"]["candidate_actions"] = [escalate_action]
         planning_result["decision_trace"] = replace(
@@ -827,10 +899,8 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(trace.verification_result["post_check"]["status"], "recovered")
         self.assertEqual(trace.verification_result["post_check"]["attempts"], 2)
         self.assertEqual(trace.final_state, "recovered")
-        self.assertEqual(
-            commands,
-            [["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"]],
-        )
+        _assert_rollout_status_count(self, commands, deployment="cartservice", count=1)
+        _assert_deployment_probe_count(self, commands, deployment="cartservice", count=4)
 
     def test_workflow_surfaces_worker_failure_cleanly(self) -> None:
         commands: list[list[str]] = []
@@ -938,13 +1008,8 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
             True,
         )
         self.assertEqual(trace.final_state, "recovered")
-        self.assertEqual(
-            commands,
-            [
-                ["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"],
-                ["kubectl", "get", "deployment", "cartservice", "-n", "default", "-o", "json"],
-            ],
-        )
+        _assert_rollout_status_count(self, commands, deployment="cartservice", count=1)
+        _assert_deployment_probe_count(self, commands, deployment="cartservice", count=1)
 
     def test_workflow_can_recover_even_if_rollout_wait_times_out(self) -> None:
         commands: list[list[str]] = []
@@ -988,10 +1053,8 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(trace.verification_result["post_check"]["status"], "recovered")
         self.assertEqual(trace.final_state, "recovered")
         self.assertFalse(trace.rollback_triggered)
-        self.assertEqual(
-            commands,
-            [["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"]],
-        )
+        _assert_rollout_status_count(self, commands, deployment="cartservice", count=1)
+        _assert_deployment_probe_count(self, commands, deployment="cartservice", count=0)
 
     def test_workflow_marks_rejected_when_human_rejects_action(self) -> None:
         result = run_crashloop_recovery_from_payload(
@@ -1012,7 +1075,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
     def test_workflow_records_optional_llm_explanations_in_node_runs(self) -> None:
         class StubFixerLLM:
             def propose(self, *, incident_summary: str, evidence: dict[str, object]) -> object:
-                from services.fixer_llm import FixerLLMResult
+                from services.llm.tasks.fixer_contract import FixerLLMResult
                 from schemas.remediation import RemediationAction
 
                 return FixerLLMResult(
@@ -1100,7 +1163,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
                 )
             raise AssertionError(f"Unexpected command: {command}")
 
-        crashloop_queries = iter([1.0, 1.0, 0.0])
+        crashloop_queries = iter([1.0, 1.0, 0.0, 0.0])
         ready_queries = iter([0.0, 1.0])
 
         def query_runner(query: str) -> float:
@@ -1137,13 +1200,11 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(trace.final_state, "rolled_back")
         self.assertIn("rollback", trace.node_runs_by_node)
         self.assertEqual(result["decision_trace_timeline"][-1]["status"], "rolled_back")
+        _assert_rollout_status_count(self, commands, deployment="cartservice", count=2)
+        _assert_deployment_probe_count(self, commands, deployment="cartservice", count=8)
         self.assertEqual(
-            commands,
-            [
-                ["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"],
-                ["kubectl", "rollout", "undo", "deployment/cartservice", "-n", "default"],
-                ["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"],
-            ],
+            commands.count(["kubectl", "rollout", "undo", "deployment/cartservice", "-n", "default"]),
+            1,
         )
 
     def test_v2_shadow_records_unrecovered_verification_after_bounded_rollback(self) -> None:
@@ -1219,8 +1280,8 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(result["decision_trace_timeline"][-2]["node_name"], "replan")
         self.assertEqual(result["decision_trace_timeline"][-1]["node_name"], "finalization")
         self.assertIn(["kubectl", "rollout", "undo", "deployment/cartservice", "-n", "default"], commands)
-        self.assertIn(["kubectl", "get", "deployment", "cartservice", "-n", "default", "-o", "json"], commands)
-        self.assertEqual(commands[-1], ["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"])
+        _assert_rollout_status_count(self, commands, deployment="cartservice", count=3)
+        _assert_deployment_probe_count(self, commands, deployment="cartservice", count=9)
 
     def test_v2_shadow_replanner_proposes_alternative_intent_after_unrecovered_undo(self) -> None:
         planning_result = run_crashloop_recovery_from_payload(
@@ -1311,23 +1372,46 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
             requires_approval=True,
             parameters={"reason": "Automated remediation should not proceed."},
         )
-        planning_result["hitl_decision"]["recommended_action"] = escalate_action
-        planning_result["hitl_decision"]["candidate_actions"] = [escalate_action]
+        escalate_candidate = {
+            "candidate_id": escalate_action.action_id,
+            "summary": escalate_action.description,
+            "confidence_score": escalate_action.confidence_score,
+            "blast_radius_score": escalate_action.blast_radius_score,
+            "requires_approval": escalate_action.requires_approval,
+            "execution_plan": {
+                "intent_id": escalate_action.action_id,
+                "operation_family": "escalate.human_review",
+                "target": {
+                    "namespace": "default",
+                    "kind": "Incident",
+                    "name": "crashloop123",
+                    "selector": None,
+                },
+                "summary": escalate_action.description,
+                "steps": [],
+                "allowed_tool_names": [],
+                "blast_radius_score": escalate_action.blast_radius_score,
+                "requires_approval": escalate_action.requires_approval,
+                "rollback_outline": {},
+            },
+            "display_labels": ["escalate.human_review", "crashloop123"],
+            "legacy_action_hint": {
+                "action_id": escalate_action.action_id,
+                "action_type": escalate_action.action_type,
+                "description": escalate_action.description,
+                "confidence_score": escalate_action.confidence_score,
+                "blast_radius_score": escalate_action.blast_radius_score,
+                "requires_approval": escalate_action.requires_approval,
+                "parameters": escalate_action.parameters,
+            },
+        }
+        planning_result["hitl_decision"]["recommended_candidate"] = escalate_candidate
+        planning_result["hitl_decision"]["candidate_options"] = [escalate_candidate]
         planning_result["decision_trace"] = replace(
             planning_result["decision_trace"],
             fixer_plan={
-                "actions": [
-                    {
-                        "action_id": escalate_action.action_id,
-                        "action_type": escalate_action.action_type,
-                        "description": escalate_action.description,
-                        "confidence_score": escalate_action.confidence_score,
-                        "blast_radius_score": escalate_action.blast_radius_score,
-                        "requires_approval": escalate_action.requires_approval,
-                        "parameters": escalate_action.parameters,
-                    }
-                ],
-                "fixer_rationale": "",
+                "candidate_options": [escalate_candidate],
+                "planner_summary": "",
                 "v2_shadow": planning_result["decision_trace"].fixer_plan["v2_shadow"],
             },
         )
@@ -1495,13 +1579,16 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         trace = result["decision_trace"]
 
         self.assertEqual(result["engine_mode"], "v2_execute")
+        self.assertIn("recommended_candidate", result["hitl_decision"])
+        self.assertNotIn("recommended_action", result["hitl_decision"])
         self.assertEqual(
             [item["node_name"] for item in result["decision_trace_timeline"][:4]],
             ["observe", "reason", "critique", "synthesize"],
         )
         self.assertEqual(trace.execution_result["status"], "succeeded")
-        self.assertEqual(trace.execution_result["dispatch_source"], "v2_execute_synthesized_plan")
-        self.assertEqual(trace.execution_result["synthesized_intent_id"], "reasoner-delete-frontend-stresschaos")
+        self.assertEqual(trace.execution_result["dispatch_source"], "v2_execution_plan")
+        self.assertEqual(trace.execution_result["candidate_id"], "reasoner-delete-frontend-stresschaos")
+        self.assertEqual(trace.execution_result["intent_id"], "reasoner-delete-frontend-stresschaos")
         self.assertEqual(trace.execution_result["execution_plan"]["operation_family"], "chaos.delete_stresschaos")
         self.assertEqual(
             trace.execution_result["dispatch"]["allowed_tool_names"],
@@ -1513,30 +1600,70 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertNotIn("verify", trace.node_runs_by_node)
         self.assertNotIn("replan", trace.node_runs_by_node)
 
-    def test_v2_execute_non_pilot_slice_falls_back_to_v1_dispatch(self) -> None:
-        crashloop_queries = iter([1.0, 1.0, 0.0, 0.0, 0.0])
+    def test_v2_execute_crashloop_restart_uses_exact_plan_and_rolls_back(self) -> None:
+        commands: list[list[str]] = []
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            if command[:3] == ["kubectl", "rollout", "status"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout='deployment "cartservice" successfully rolled out\n',
+                    stderr="",
+                )
+            if command[:3] == ["kubectl", "rollout", "undo"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout="deployment.apps/cartservice rolled back\n",
+                    stderr="",
+                )
+            if command[:3] == ["kubectl", "get", "deployment"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout='{"status": {"availableReplicas": 0, "readyReplicas": 0, "observedGeneration": 1}}',
+                    stderr="",
+                )
+            if command[:3] == ["kubectl", "logs", "cartservice-7d6b9f5bb4-abcde"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout="Authorization: bearer-token\nhealthy\n",
+                    stderr="",
+                )
+            if command[:3] == ["kubectl", "rollout", "history"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout="deployment.apps/cartservice with revision #3\n",
+                    stderr="",
+                )
+            raise AssertionError(f"Unexpected command: {command}")
+
+        crashloop_queries = iter([1.0, 1.0, 0.0, 0.0])
+        ready_queries = iter([1.0, 0.0, 1.0])
 
         def query_runner(query: str) -> float:
             if "kube_pod_container_status_waiting_reason" in query:
                 return next(crashloop_queries)
             if "kube_pod_status_ready" in query:
-                return 1.0
+                return next(ready_queries)
             raise AssertionError(f"Unexpected query: {query}")
 
-        kubernetes = KubernetesClient(
-            runner=lambda command: subprocess.CompletedProcess(
-                args=list(command),
-                returncode=0,
-                stdout='{"items": [], "metadata": {"name": "ok"}}',
-                stderr="",
-            )
+        prometheus = PrometheusClient(
+            query_runner=query_runner,
+            post_check_retry_attempts=1,
+            post_check_retry_sleep_seconds=0.0,
+            sleep_fn=lambda _: None,
         )
         result = run_crashloop_recovery_from_payload(
             _crashloop_payload(),
             engine_mode="v2_execute",
             approve_action_id="restart_cartservice",
-            kubernetes_client=kubernetes,
-            prometheus_client=PrometheusClient(query_runner=query_runner, sleep_fn=lambda _: None),
+            kubernetes_client=KubernetesClient(runner=runner),
+            prometheus_client=prometheus,
             execution_worker_client=_worker_client(stdout="deployment.apps/cartservice restarted\n"),
         )
 
@@ -1544,10 +1671,22 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
 
         self.assertEqual(result["engine_mode"], "v2_execute")
         self.assertEqual(trace.execution_result["status"], "succeeded")
-        self.assertEqual(trace.execution_result["dispatch_source"], "v1_fallback_non_pilot")
-        self.assertIn("Current v2_execute pilot only supports", trace.execution_result["dispatch_fallback_reason"])
+        self.assertEqual(trace.execution_result["dispatch_source"], "v2_execution_plan")
+        self.assertEqual(trace.execution_result["candidate_id"], "reasoner-rollout-restart-cartservice")
         self.assertEqual(trace.execution_result["action_type"], "rollout_restart_deployment")
-        self.assertEqual(trace.final_state, "recovered")
+        self.assertTrue(trace.rollback_triggered)
+        self.assertEqual(trace.execution_result["rollback"]["status"], "succeeded")
+        self.assertEqual(trace.verification_result["post_check"]["status"], "unrecovered")
+        self.assertEqual(trace.verification_result["post_rollback_check"]["status"], "recovered")
+        self.assertEqual(trace.final_state, "rolled_back")
+        self.assertIn(
+            ["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"],
+            commands,
+        )
+        self.assertIn(
+            ["kubectl", "rollout", "undo", "deployment/cartservice", "-n", "default"],
+            commands,
+        )
 
     def test_v2_execute_network_partition_pilot_uses_synthesized_dispatch(self) -> None:
         network_queries = iter([0.0, 0.0, 150.0])
@@ -1586,8 +1725,8 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
             ["observe", "reason", "critique", "synthesize"],
         )
         self.assertEqual(trace.execution_result["status"], "succeeded")
-        self.assertEqual(trace.execution_result["dispatch_source"], "v2_execute_synthesized_plan")
-        self.assertEqual(trace.execution_result["synthesized_intent_id"], "reasoner-delete-networkchaos")
+        self.assertEqual(trace.execution_result["dispatch_source"], "v2_execution_plan")
+        self.assertEqual(trace.execution_result["candidate_id"], "reasoner-delete-networkchaos")
         self.assertEqual(trace.execution_result["execution_plan"]["operation_family"], "chaos.delete_networkchaos")
         self.assertEqual(
             trace.execution_result["dispatch"]["allowed_tool_names"],
@@ -1641,8 +1780,8 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
             ["observe", "reason", "critique", "synthesize"],
         )
         self.assertEqual(trace.execution_result["status"], "succeeded")
-        self.assertEqual(trace.execution_result["dispatch_source"], "v2_execute_synthesized_plan")
-        self.assertEqual(trace.execution_result["synthesized_intent_id"], "reasoner-rollout-undo-frontend")
+        self.assertEqual(trace.execution_result["dispatch_source"], "v2_execution_plan")
+        self.assertEqual(trace.execution_result["candidate_id"], "reasoner-rollout-undo-frontend")
         self.assertEqual(trace.execution_result["execution_plan"]["operation_family"], "rollout.undo_deployment")
         self.assertEqual(
             trace.execution_result["dispatch"]["allowed_tool_names"],
@@ -1719,8 +1858,8 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
             ["observe", "reason", "critique", "synthesize"],
         )
         self.assertEqual(trace.execution_result["status"], "succeeded")
-        self.assertEqual(trace.execution_result["dispatch_source"], "v2_execute_synthesized_plan")
-        self.assertEqual(trace.execution_result["synthesized_intent_id"], "reasoner-rollout-undo-cartservice")
+        self.assertEqual(trace.execution_result["dispatch_source"], "v2_execution_plan")
+        self.assertEqual(trace.execution_result["candidate_id"], "reasoner-rollout-undo-cartservice")
         self.assertEqual(trace.execution_result["execution_plan"]["operation_family"], "rollout.undo_deployment")
         self.assertEqual(
             trace.execution_result["dispatch"]["allowed_tool_names"],
@@ -1735,6 +1874,94 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertIn(
             ["kubectl", "rollout", "status", "deployment/cartservice", "-n", "default", "--timeout=60s"],
             commands,
+        )
+
+    def test_v2_execute_crashloop_undo_waits_for_kubernetes_availability_grace(self) -> None:
+        crashloop_queries = iter([1.0, 1.0, 0.0])
+        ready_queries = iter([1.0, 0.0])
+        deployment_statuses = iter(
+            [
+                '{"status": {"availableReplicas": 0, "readyReplicas": 0, "observedGeneration": 67}}',
+                '{"status": {"availableReplicas": 0, "readyReplicas": 0, "observedGeneration": 67}}',
+                '{"status": {"availableReplicas": 1, "readyReplicas": 1, "observedGeneration": 67}}',
+            ]
+        )
+        commands: list[list[str]] = []
+
+        def query_runner(query: str) -> float:
+            if "kube_pod_container_status_waiting_reason" in query:
+                return next(crashloop_queries)
+            if "kube_pod_status_ready" in query:
+                return next(ready_queries)
+            raise AssertionError(f"Unexpected query: {query}")
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            if command[:3] == ["kubectl", "logs", "cartservice-7d6b9f5bb4-abcde"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout="Authorization: bearer-token\nhealthy\n",
+                    stderr="",
+                )
+            if command[:3] == ["kubectl", "rollout", "history"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout="deployment.apps/cartservice with revision #3\n",
+                    stderr="",
+                )
+            if command[:3] == ["kubectl", "rollout", "status"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout='deployment "cartservice" successfully rolled out\n',
+                    stderr="",
+                )
+            if command[:3] == ["kubectl", "get", "deployment"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout=next(deployment_statuses),
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout='{"items": [], "metadata": {"name": "ok"}}',
+                stderr="",
+            )
+
+        result = run_crashloop_recovery_from_payload(
+            _crashloop_payload(),
+            engine_mode="v2_execute",
+            approve_action_id="rollout_undo_cartservice",
+            kubernetes_client=KubernetesClient(runner=runner),
+            prometheus_client=PrometheusClient(
+                query_runner=query_runner,
+                post_check_retry_attempts=1,
+                post_check_retry_sleep_seconds=0.0,
+                sleep_fn=lambda _: None,
+            ),
+            execution_worker_client=_worker_client(
+                stdout="deployment.apps/cartservice rolled back\n",
+            ),
+        )
+
+        trace = result["decision_trace"]
+
+        self.assertEqual(trace.execution_result["dispatch_source"], "v2_execution_plan")
+        self.assertEqual(trace.execution_result["deployment_availability"]["availability_status"], "available")
+        self.assertGreaterEqual(trace.execution_result["deployment_availability"]["attempts"], 2)
+        self.assertEqual(trace.verification_result["post_check"]["status"], "recovered")
+        self.assertEqual(
+            trace.verification_result["post_check"]["kubernetes_fallback"]["is_available"],
+            True,
+        )
+        self.assertEqual(trace.final_state, "recovered")
+        self.assertEqual(
+            len([command for command in commands if command[:3] == ["kubectl", "get", "deployment"]]),
+            3,
         )
 
     def test_cpu_workflow_marks_rejected_when_human_rejects_action(self) -> None:
@@ -1847,7 +2074,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         result = run_recovery_from_payload(
             _bad_config_payload(),
             approve_action_id="rollout_undo_frontend_bad_config",
-            prometheus_client=PrometheusClient(query_runner=query_runner),
+            prometheus_client=PrometheusClient(query_runner=query_runner, sleep_fn=lambda _: None),
             kubernetes_client=KubernetesClient(runner=runner),
             execution_worker_client=_worker_client(
                 stdout="deployment.apps/frontend rolled back\n",
@@ -1866,9 +2093,13 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(trace.final_state, "recovered")
         self.assertIn("execution_worker", trace.node_runs_by_node)
         self.assertIn("rollout_wait", trace.node_runs_by_node)
-        self.assertEqual(
+        self.assertIn(
+            ["kubectl", "rollout", "status", "deployment/frontend", "-n", "default", "--timeout=60s"],
             commands,
-            [["kubectl", "rollout", "status", "deployment/frontend", "-n", "default", "--timeout=60s"]],
+        )
+        self.assertEqual(
+            len([command for command in commands if command[:3] == ["kubectl", "get", "deployment"]]),
+            4,
         )
 
     def test_bad_config_workflow_skips_execution_when_probe_telemetry_is_missing(self) -> None:

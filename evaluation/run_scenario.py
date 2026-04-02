@@ -9,11 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from evaluation.metrics import compute_metrics, render_metrics_markdown
-from services.execution_worker import ExecutionWorkerClient
-from services.judge_llm import JudgeLLMResult
-from services.kubernetes_client import KubernetesClient
-from services.prometheus_client import PrometheusClient
-from workflows.recovery_workflow import run_recovery_from_payload
+from services.infra.kubernetes.execution_worker import ExecutionWorkerClient
+from services.llm.tasks.judge_contract import JudgeLLMResult
+from services.infra.kubernetes.client import KubernetesClient
+from services.observability.prometheus import PrometheusClient
+from workflows.recovery_workflow import DEFAULT_ENGINE_MODE, run_recovery_from_payload
 
 
 def run_scenarios(
@@ -69,6 +69,7 @@ def _run_single_scenario(
         payload,
         approve_action_id=scenario.get("approve_action_id"),
         reject_action_id=scenario.get("reject_action_id"),
+        engine_mode=scenario.get("engine_mode", DEFAULT_ENGINE_MODE),
         judge_llm=judge_llm,
         kubernetes_client=kubernetes,
         prometheus_client=prometheus,

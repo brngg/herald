@@ -3,7 +3,10 @@ from __future__ import annotations
 import unittest
 
 from schemas.intents import OperationIntent, ResourceTarget
-from services.kubectl_compiler import compile_execution_plan, compile_v1_dispatch_preview
+from services.recovery.kubectl_compiler import (
+    compile_execution_plan,
+    compile_v1_dispatch_preview,
+)
 
 
 class KubectlCompilerTest(unittest.TestCase):
@@ -56,6 +59,33 @@ class KubectlCompilerTest(unittest.TestCase):
         assert plan is not None
         self.assertEqual(plan.steps, [])
         self.assertEqual(compile_v1_dispatch_preview(plan)["executable"], False)
+
+    def test_compiles_scale_intent_to_bounded_command(self) -> None:
+        plan = compile_execution_plan(
+            OperationIntent(
+                intent_id="intent-scale",
+                intent="Scale frontend to two replicas.",
+                operation_family="scale.deployment",
+                target=ResourceTarget(namespace="default", kind="Deployment", name="frontend"),
+                arguments={"replicas": 2},
+                reversible=True,
+                confidence_score=0.72,
+                blast_radius_score=0.25,
+                requires_approval=True,
+                verification_hints={"post_check": "deployment_readiness_shortfall"},
+                rollback_hints={},
+            )
+        )
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(
+            plan.steps[0].command,
+            ["kubectl", "scale", "deployment/frontend", "-n", "default", "--replicas=2"],
+        )
+        preview = compile_v1_dispatch_preview(plan)
+        self.assertEqual(preview["action_type"], "scale_deployment")
+        self.assertEqual(preview["parameters"]["replicas"], 2)
 
 
 if __name__ == "__main__":

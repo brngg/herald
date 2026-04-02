@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from services.prometheus_client import PrometheusClient
+from services.observability.prometheus import PrometheusClient
 
 
 class PrometheusClientTest(unittest.TestCase):
@@ -60,6 +60,24 @@ class PrometheusClientTest(unittest.TestCase):
         self.assertTrue(result["should_execute"])
         self.assertIn("[1m]", result["query"])
 
+    def test_pre_check_deployment_readiness_shortfall_reports_ready_to_execute(self) -> None:
+        client = PrometheusClient(
+            query_runner=lambda query: 0.0 if "kube_pod_status_ready" in query else 1.0,
+            pre_check_retry_attempts=1,
+            sleep_fn=lambda _: None,
+        )
+
+        result = client.pre_check_deployment_readiness_shortfall(
+            namespace="default",
+            deployment="frontend",
+            min_ready_count=2,
+        )
+
+        self.assertEqual(result["status"], "ready_to_execute")
+        self.assertEqual(result["ready_count"], 0.0)
+        self.assertEqual(result["min_ready_count"], 2)
+        self.assertTrue(result["should_execute"])
+
     def test_post_check_cpu_saturation_reports_recovered(self) -> None:
         values = iter([0.02, 1.0])
 
@@ -78,6 +96,23 @@ class PrometheusClientTest(unittest.TestCase):
         self.assertEqual(result["cpu_usage"], 0.02)
         self.assertEqual(result["ready_count"], 1.0)
         self.assertIn("[1m]", result["queries"]["cpu"])
+
+    def test_post_check_deployment_readiness_target_reports_recovered(self) -> None:
+        client = PrometheusClient(
+            query_runner=lambda query: 2.0 if "kube_pod_status_ready" in query else 0.0,
+            post_check_retry_attempts=1,
+            sleep_fn=lambda _: None,
+        )
+
+        result = client.post_check_deployment_readiness_target(
+            namespace="default",
+            deployment="frontend",
+            min_ready_count=2,
+        )
+
+        self.assertEqual(result["status"], "recovered")
+        self.assertEqual(result["ready_count"], 2.0)
+        self.assertEqual(result["min_ready_count"], 2)
 
     def test_cpu_query_window_is_configurable(self) -> None:
         seen_queries: list[str] = []

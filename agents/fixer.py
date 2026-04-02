@@ -7,8 +7,8 @@ from typing import Any, NotRequired, TypedDict
 
 from schemas.incident import Incident
 from schemas.remediation import RemediationAction
-from services.fixer_llm import FixerLLM, FixerLLMResult
-from services.incident_normalization import normalize_incident_class
+from services.llm.tasks.fixer_contract import FixerLLM, FixerLLMResult
+from services.normalization.incident import normalize_incident_class
 
 
 class FixerAgentState(TypedDict):
@@ -326,7 +326,7 @@ def run_fixer_for_alertmanager_payload(
 ) -> list[FixerAgentState]:
     """Convert an Alertmanager payload into Incident objects and run the Fixer."""
 
-    from services.alertmanager_client import incidents_from_alertmanager_payload
+    from services.alerts.alertmanager import incidents_from_alertmanager_payload
 
     incidents = incidents_from_alertmanager_payload(payload)
     return [run_fixer_pipeline(incident, llm=llm) for incident in incidents]
@@ -463,7 +463,7 @@ def main() -> int:
     llm: FixerLLM | None = None
     if not args.no_llm:
         if args.provider == "gemini":
-            from services.gemini_fixer_llm import GeminiFixerLLM
+            from services.llm.tasks.fixer import GeminiFixerLLM
 
             llm = GeminiFixerLLM(model=args.model)
         else:

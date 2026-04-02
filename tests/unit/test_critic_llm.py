@@ -5,7 +5,11 @@ import unittest
 from schemas.critic import CriticOutput
 from schemas.intents import CapabilityCatalog, OperationIntent, ReasonerOutput, ResourceTarget
 from schemas.observations import ObservationBundle
-from services.critic_llm import build_critic_prompts, critic_output_json_schema, parse_critic_llm_result
+from services.llm.tasks.critic_contract import (
+    build_critic_prompts,
+    critic_output_json_schema,
+    parse_critic_llm_result,
+)
 
 
 class CriticLLMTest(unittest.TestCase):

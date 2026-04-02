@@ -7,10 +7,10 @@ from schemas.incident import Incident
 from schemas.intents import CapabilityCatalog, OperationIntent, ReasonerOutput, ResourceTarget
 from schemas.observations import ObservationBundle
 from schemas.remediation import RemediationAction
-from services.capability_catalog import default_capability_catalog
-from services.incident_normalization import normalize_incident_class
-from services.intent_compat import intent_to_v1_remediation
-from services.reasoner_llm import ReasonerLLM, ReasonerLLMResult
+from services.recovery.capability_catalog import default_capability_catalog
+from services.normalization.incident import normalize_incident_class
+from services.recovery.intent_compat import intent_to_v1_remediation
+from services.llm.tasks.reasoner_contract import ReasonerLLM, ReasonerLLMResult
 
 
 class ReasonerAgentState(TypedDict):
@@ -204,7 +204,49 @@ def heuristic_reason_node(state: ReasonerAgentState) -> dict[str, Any]:
         diagnosis_summary = "Cartservice dependency traffic appears near zero and is consistent with an active network partition."
         likely_causes = ["A Chaos Mesh NetworkChaos rule is partitioning frontend from cartservice."]
     else:
-        raise ValueError(f"unsupported incident_class for Phase 2 Reasoner: {incident_class_hint!r}")
+        dynamic_scale_output = _dynamic_scale_reasoning(
+            observations=observations,
+            incident=incident,
+            namespace=namespace,
+            deployment_hint=deployment_hint or service_hint,
+        )
+        if dynamic_scale_output is None:
+            reasoner_output = ReasonerOutput(
+                diagnosis_summary=(
+                    "The bounded heuristic Reasoner could not map the current evidence to a safe automated recovery."
+                ),
+                likely_causes=[
+                    "The incident falls outside the current benchmark-shaped heuristic rules.",
+                ],
+                missing_information=[
+                    "A more specific diagnosis or operator review is required before safe execution.",
+                ],
+                intents=[
+                    OperationIntent(
+                        intent_id=f"reasoner-escalate-{incident.incident_id}",
+                        intent="Escalate the incident to a human operator for deeper investigation.",
+                        operation_family="escalate.human_review",
+                        target=ResourceTarget(namespace=namespace, kind="Incident", name=incident.incident_id),
+                        arguments={"reason": "Bounded heuristic recovery is not clearly justified by the current evidence."},
+                        reversible=True,
+                        confidence_score=0.2,
+                        blast_radius_score=0.0,
+                        requires_approval=True,
+                        verification_hints={},
+                        rollback_hints={},
+                    )
+                ],
+            )
+            return {
+                "reasoner_output": reasoner_output,
+                "mapped_v1_candidates": _mapped_v1_candidates(reasoner_output.intents),
+                "status": "succeeded",
+            }
+        return {
+            "reasoner_output": dynamic_scale_output,
+            "mapped_v1_candidates": _mapped_v1_candidates(dynamic_scale_output.intents),
+            "status": "succeeded",
+        }
 
     reasoner_output = ReasonerOutput(
         diagnosis_summary=diagnosis_summary,
@@ -310,6 +352,82 @@ def _string_or_none(value: Any) -> str | None:
     if isinstance(value, str) and value:
         return value
     return None
+
+
+def _dynamic_scale_reasoning(
+    *,
+    observations: ObservationBundle,
+    incident: Incident,
+    namespace: str,
+    deployment_hint: str | None,
+) -> ReasonerOutput | None:
+    deployment_summary = observations.kubernetes.get("deployment_summary")
+    if not isinstance(deployment_summary, dict):
+        return None
+
+    deployment_name = deployment_hint or _string_or_none(deployment_summary.get("name"))
+    if deployment_name is None:
+        return None
+
+    desired_replicas = _non_negative_int(deployment_summary.get("desired_replicas"))
+    ready_replicas = _non_negative_int(deployment_summary.get("ready_replicas"))
+    available_replicas = _non_negative_int(deployment_summary.get("available_replicas"))
+    current_ready = max(ready_replicas, available_replicas)
+
+    if desired_replicas > 0:
+        return None
+
+    target_replicas = 1
+    return ReasonerOutput(
+        diagnosis_summary=(
+            f"Deployment {deployment_name} appears scaled below a safe ready minimum and likely needs bounded capacity restored."
+        ),
+        likely_causes=[
+            f"Deployment {deployment_name} currently reports desired_replicas={desired_replicas} and ready_replicas={current_ready}.",
+        ],
+        missing_information=[],
+        intents=[
+            OperationIntent(
+                intent_id=f"reasoner-scale-{deployment_name}-{target_replicas}",
+                intent=f"Scale Deployment {deployment_name} back to {target_replicas} replica.",
+                operation_family="scale.deployment",
+                target=ResourceTarget(namespace=namespace, kind="Deployment", name=deployment_name),
+                arguments={"replicas": target_replicas},
+                reversible=True,
+                confidence_score=0.78,
+                blast_radius_score=0.25,
+                requires_approval=True,
+                verification_hints={
+                    "pre_check": "deployment_readiness_shortfall",
+                    "post_check": "deployment_readiness_shortfall",
+                    "target_replicas": target_replicas,
+                    "min_ready_count": target_replicas,
+                },
+                rollback_hints={"previous_replicas": desired_replicas},
+            ),
+            OperationIntent(
+                intent_id=f"reasoner-escalate-{deployment_name}-scale",
+                intent=f"Escalate deployment readiness shortfall on {deployment_name} for human review.",
+                operation_family="escalate.human_review",
+                target=ResourceTarget(namespace=namespace, kind="Incident", name=incident.incident_id),
+                arguments={"reason": "Bounded scaling may restore safe availability, but the root cause of the replica shortfall is still unknown."},
+                reversible=True,
+                confidence_score=0.3,
+                blast_radius_score=0.0,
+                requires_approval=True,
+                verification_hints={},
+                rollback_hints={},
+            ),
+        ],
+    )
+
+
+def _non_negative_int(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed >= 0 else 0
 
 
 def _to_jsonable(value: Any) -> Any:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from schemas.remediation import RemediationAction
-from services.judge_llm import (
+from services.llm.tasks.judge_contract import (
     JudgeLLMResult,
     build_judge_prompts,
     parse_judge_llm_result,

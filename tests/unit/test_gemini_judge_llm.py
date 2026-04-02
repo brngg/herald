@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from schemas.remediation import RemediationAction
-from services.gemini_judge_llm import (
+from services.llm.tasks.judge import (
     _build_generate_content_request,
     _extract_response_text,
     _get_gemini_api_key,

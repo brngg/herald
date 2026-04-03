@@ -127,6 +127,83 @@ class KubernetesClientTest(unittest.TestCase):
             [["kubectl", "delete", "networkchaos", "frontend-to-cartservice-partition", "-n", "default"]],
         )
 
+    def test_get_service_context_uses_expected_command(self) -> None:
+        commands: list[list[str]] = []
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout='{"metadata": {"name": "frontend"}}',
+                stderr="",
+            )
+
+        client = KubernetesClient(runner=runner)
+
+        result = client.get_service_context(namespace="default", service="frontend")
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["resource"]["metadata"]["name"], "frontend")
+        self.assertEqual(
+            commands,
+            [["kubectl", "get", "service", "frontend", "-n", "default", "-o", "json"]],
+        )
+
+    def test_list_endpoint_slices_uses_service_label_selector(self) -> None:
+        commands: list[list[str]] = []
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout='{"items": []}',
+                stderr="",
+            )
+
+        client = KubernetesClient(runner=runner)
+
+        result = client.list_endpoint_slices(namespace="default", service="frontend")
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(
+            commands,
+            [[
+                "kubectl",
+                "get",
+                "endpointslices",
+                "-n",
+                "default",
+                "-l",
+                "kubernetes.io/service-name=frontend",
+                "-o",
+                "json",
+            ]],
+        )
+
+    def test_delete_pod_uses_expected_command(self) -> None:
+        commands: list[list[str]] = []
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout='pod "cartservice-abcde" deleted\n',
+                stderr="",
+            )
+
+        client = KubernetesClient(runner=runner)
+
+        result = client.delete_pod(namespace="default", pod="cartservice-abcde")
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(
+            commands,
+            [["kubectl", "delete", "pod", "cartservice-abcde", "-n", "default"]],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

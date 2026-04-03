@@ -1,0 +1,44 @@
+{
+  "receiver": "default/herald-webhook-routing/herald-webhook",
+  "status": "firing",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HeraldUnknownDependencyFailure",
+        "incident_class": "unknown",
+        "namespace": "default",
+        "deployment": "frontend",
+        "service": "frontend",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "frontend dependency behavior looks unhealthy",
+        "description": "The current bounded capability set does not justify a direct mutation."
+      },
+      "startsAt": "2026-03-23T20:00:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus/graph",
+      "fingerprint": "unknown-dependency-456"
+    }
+  ],
+  "groupLabels": {
+    "alertname": "HeraldUnknownDependencyFailure",
+    "incident_class": "unknown",
+    "namespace": "default"
+  },
+  "commonLabels": {
+    "alertname": "HeraldUnknownDependencyFailure",
+    "incident_class": "unknown",
+    "namespace": "default",
+    "deployment": "frontend",
+    "severity": "warning"
+  },
+  "commonAnnotations": {
+    "summary": "frontend dependency behavior looks unhealthy"
+  },
+  "externalURL": "http://alertmanager",
+  "version": "4",
+  "groupKey": "{}/{namespace=\"default\"}:{alertname=\"HeraldUnknownDependencyFailure\"}",
+  "truncatedAlerts": 0
+}

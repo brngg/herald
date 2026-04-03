@@ -5,9 +5,7 @@ import json
 from dataclasses import dataclass, replace
 from typing import Any, Literal
 
-from agents.fixer import run_fixer_pipeline
 from agents.critic import run_critic_pipeline
-from agents.judge import run_judge_pipeline
 from agents.replanner import run_replanner_pipeline
 from agents.reasoner import run_reasoner_pipeline
 from agents.synthesizer import run_synthesizer_pipeline
@@ -26,8 +24,6 @@ from services.llm.tasks.critic import GeminiCriticLLM
 from services.normalization.incident import normalize_incident_class
 from services.runtime.decision_trace import append_node_run, initialize_trace_provenance
 from services.infra.kubernetes.execution_worker import ExecutionWorkerClient
-from services.llm.tasks.fixer import GeminiFixerLLM
-from services.llm.tasks.judge import GeminiJudgeLLM
 from services.llm.tasks.reasoner import GeminiReasonerLLM
 from services.infra.kubernetes.client import KubernetesClient
 from services.observability.prometheus import PrometheusClient
@@ -94,8 +90,9 @@ from workflows.runtime.execution_runtime import (
 ROLLOUT_WAIT_TIMEOUT_SECONDS = 60
 ROLLOUT_AVAILABILITY_GRACE_ATTEMPTS = 4
 ROLLOUT_AVAILABILITY_GRACE_SLEEP_SECONDS = 5.0
-EngineMode = Literal["v1", "v2_shadow", "v2_execute"]
-VALID_ENGINE_MODES: tuple[EngineMode, ...] = ("v1", "v2_shadow", "v2_execute")
+EngineMode = Literal["v2_shadow", "v2_execute"]
+LEGACY_ENGINE_MODE = "v1"
+VALID_ENGINE_MODES: tuple[EngineMode, ...] = ("v2_shadow", "v2_execute")
 DEFAULT_ENGINE_MODE: EngineMode = "v2_execute"
 
 
@@ -104,7 +101,7 @@ def run_recovery_from_payload(
     *,
     approve_action_id: str | None = None,
     reject_action_id: str | None = None,
-    engine_mode: EngineMode | str = "v1",
+    engine_mode: EngineMode | str = DEFAULT_ENGINE_MODE,
     fixer_llm: Any = None,
     judge_llm: Any = None,
     reasoner_llm: Any = None,
@@ -206,7 +203,7 @@ def run_crashloop_recovery_from_payload(
     *,
     approve_action_id: str | None = None,
     reject_action_id: str | None = None,
-    engine_mode: EngineMode | str = "v1",
+    engine_mode: EngineMode | str = DEFAULT_ENGINE_MODE,
     fixer_llm: Any = None,
     judge_llm: Any = None,
     reasoner_llm: Any = None,
@@ -236,13 +233,13 @@ def run_recovery_from_saved_plan(
     *,
     approve_action_id: str | None = None,
     reject_action_id: str | None = None,
-    engine_mode: EngineMode | str = "v1",
+    engine_mode: EngineMode | str = DEFAULT_ENGINE_MODE,
     critic_llm: Any = None,
     kubernetes_client: KubernetesClient | None = None,
     prometheus_client: PrometheusClient | None = None,
     execution_worker_client: ExecutionWorkerClient | None = None,
 ) -> dict[str, Any]:
-    engine_mode = _validate_engine_mode(str(saved_result.get("engine_mode", engine_mode)))
+    engine_mode = _validate_engine_mode(str(saved_result.get("engine_mode", engine_mode)), allow_legacy=True)
     if approve_action_id and reject_action_id:
         raise ValueError("Specify either approve_action_id or reject_action_id, not both.")
     if approve_action_id is None and reject_action_id is None:
@@ -303,7 +300,7 @@ def run_crashloop_recovery_from_saved_plan(
     *,
     approve_action_id: str | None = None,
     reject_action_id: str | None = None,
-    engine_mode: EngineMode | str = "v1",
+    engine_mode: EngineMode | str = DEFAULT_ENGINE_MODE,
     critic_llm: Any = None,
     kubernetes_client: KubernetesClient | None = None,
     prometheus_client: PrometheusClient | None = None,
@@ -339,8 +336,12 @@ def _plan_recovery(
     verifier_state: dict[str, Any] | None = None,
     replanner_state: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], HITLDecision]:
-    fixer_state = run_fixer_pipeline(incident, llm=fixer_llm)
     if engine_mode != "v1":
+        fixer_state = _build_v2_compat_fixer_state(
+            incident=incident,
+            reasoner_state=reasoner_state,
+            synthesizer_state=synthesizer_state,
+        )
         candidate_options = _build_v2_candidate_options(
             incident=incident,
             fixer_state=fixer_state,
@@ -479,6 +480,10 @@ def _plan_recovery(
         )
         return fixer_state, judge_state, hitl_decision
 
+    from agents.fixer import run_fixer_pipeline
+    from agents.judge import run_judge_pipeline
+
+    fixer_state = run_fixer_pipeline(incident, llm=fixer_llm)
     judge_state = run_judge_pipeline(
         incident=incident,
         evidence=fixer_state["evidence"],
@@ -590,22 +595,24 @@ def _plan_recovery(
         summary="HITL Gate routed the plan according to confidence, blast radius, and Judge verdict.",
         input_summary={
             "judge_verdict": judge_state["judge_verdict"],
-            "candidate_action_ids": [action.action_id for action in hitl_decision.candidate_actions],
+            "candidate_ids": [candidate.candidate_id for candidate in hitl_decision.candidate_options],
         },
         output_summary={
             "routing_decision": hitl_decision.routing_decision,
             "requires_approval": hitl_decision.requires_approval,
-            "recommended_action_id": (
-                hitl_decision.recommended_action.action_id if hitl_decision.recommended_action else None
+            "recommended_candidate_id": (
+                hitl_decision.recommended_candidate.candidate_id
+                if hitl_decision.recommended_candidate
+                else None
             ),
-            "candidate_action_ids": [action.action_id for action in hitl_decision.candidate_actions],
+            "candidate_ids": [candidate.candidate_id for candidate in hitl_decision.candidate_options],
         },
     )
     hitl_decision = HITLDecision(
         routing_decision=hitl_decision.routing_decision,
         requires_approval=hitl_decision.requires_approval,
-        recommended_action=hitl_decision.recommended_action,
-        candidate_actions=hitl_decision.candidate_actions,
+        recommended_candidate=hitl_decision.recommended_candidate,
+        candidate_options=hitl_decision.candidate_options,
         decision_trace=trace,
     )
     return fixer_state, judge_state, hitl_decision
@@ -2521,6 +2528,34 @@ def _build_v2_candidate_options(
     return candidates
 
 
+def _build_v2_compat_fixer_state(
+    *,
+    incident: Any,
+    reasoner_state: dict[str, Any] | None,
+    synthesizer_state: dict[str, Any] | None,
+) -> dict[str, Any]:
+    reasoner_output = (reasoner_state or {}).get("reasoner_output")
+    incident_summary = str(
+        (reasoner_state or {}).get("incident_summary")
+        or getattr(reasoner_output, "diagnosis_summary", "")
+        or ""
+    )
+    synthesis_output = (synthesizer_state or {}).get("synthesis_output")
+    fixer_rationale = str(
+        getattr(synthesis_output, "summary", "")
+        or (reasoner_state or {}).get("failure_reason")
+        or "v2 planning produced capability-driven recovery candidates."
+    )
+    return {
+        "incident_id": incident.incident_id,
+        "incident_summary": incident_summary,
+        "actions": list((reasoner_state or {}).get("mapped_v1_candidates", [])),
+        "evidence": [],
+        "fixer_rationale": fixer_rationale,
+        "status": "succeeded" if reasoner_output is not None else "failed",
+    }
+
+
 def _build_v2_judge_state(
     *,
     incident: Any,
@@ -2629,16 +2664,23 @@ def _execution_worker_candidate_explanation(
 
 
 def _select_action(hitl_decision: HITLDecision, action_id: str) -> RemediationAction:
-    for action in hitl_decision.candidate_actions:
-        if action.action_id == action_id:
-            return action
+    for candidate in hitl_decision.candidate_options:
+        if candidate.candidate_id == action_id:
+            legacy_action = _legacy_action_for_candidate(candidate)
+            if legacy_action is not None:
+                return legacy_action
+            return _upgrade_candidate_to_action_fallback(candidate)
     raise ValueError(f"Approved action_id {action_id!r} is not available in the HITL decision.")
 
 
-def _validate_engine_mode(value: str) -> EngineMode:
-    if value not in VALID_ENGINE_MODES:
-        raise ValueError(f"Unsupported engine_mode: {value!r}")
-    return value
+def _validate_engine_mode(value: str, *, allow_legacy: bool = False) -> EngineMode | str:
+    if value in VALID_ENGINE_MODES:
+        return value  # type: ignore[return-value]
+    if allow_legacy and value == LEGACY_ENGINE_MODE:
+        return value
+    if allow_legacy:
+        raise ValueError(f"Unsupported engine_mode in saved artifact: {value!r}")
+    raise ValueError(f"Unsupported engine_mode: {value!r}")
 
 
 def _collect_observations(
@@ -3348,9 +3390,12 @@ def _approved_action_for_execution(trace: DecisionTrace, hitl_decision: HITLDeci
 
     if not action_id:
         return None
-    for action in hitl_decision.candidate_actions:
-        if action.action_id == action_id:
-            return action
+    for candidate in hitl_decision.candidate_options:
+        if candidate.candidate_id == action_id:
+            legacy_action = _legacy_action_for_candidate(candidate)
+            if legacy_action is not None:
+                return legacy_action
+            return _upgrade_candidate_to_action_fallback(candidate)
     return None
 
 
@@ -3387,7 +3432,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--interactive-hitl",
         action="store_true",
-        help="Run planning first, then prompt in the terminal: 1 = approve recommended action, 2 = reject.",
+        help="Run planning first, then prompt in the terminal: 1 = approve recommended candidate, 2 = reject.",
     )
     parser.add_argument(
         "--fixer-provider",
@@ -3460,10 +3505,12 @@ def main() -> int:
     else:
         fixer_llm = None
         if args.fixer_provider == "gemini":
+            from services.llm.tasks.fixer import GeminiFixerLLM
             fixer_llm = GeminiFixerLLM(model=args.fixer_model)
 
         judge_llm = None
         if args.judge_provider == "gemini":
+            from services.llm.tasks.judge import GeminiJudgeLLM
             judge_llm = GeminiJudgeLLM(model=args.judge_model)
         reasoner_llm = None
         if args.reasoner_provider == "gemini":
@@ -3534,7 +3581,7 @@ def _continue_with_interactive_hitl(
                     payload,
                     planning_result,
                     approve_action_id=selection_id,
-                    engine_mode=str(planning_result.get("engine_mode", "v1")),
+                    engine_mode=str(planning_result.get("engine_mode", DEFAULT_ENGINE_MODE)),
                     kubernetes_client=kubernetes_client,
                     prometheus_client=prometheus_client,
                     execution_worker_client=execution_worker_client,
@@ -3544,25 +3591,25 @@ def _continue_with_interactive_hitl(
                     payload,
                     planning_result,
                     reject_action_id=selection_id,
-                    engine_mode=str(planning_result.get("engine_mode", "v1")),
+                    engine_mode=str(planning_result.get("engine_mode", DEFAULT_ENGINE_MODE)),
                     kubernetes_client=kubernetes_client,
                     prometheus_client=prometheus_client,
                     execution_worker_client=execution_worker_client,
                 )
             output_fn("Enter 1 to approve or 2 to reject.", flush=True)
 
-    recommended_action = hitl_decision.get("recommended_action")
-    if recommended_action is None:
+    recommended_candidate = hitl_decision.get("recommended_candidate")
+    if recommended_candidate is None:
         return planning_result
 
-    if isinstance(recommended_action, dict):
-        action_id = str(recommended_action["action_id"])
-        action_type = str(recommended_action["action_type"])
+    if isinstance(recommended_candidate, dict):
+        selection_id = str(recommended_candidate["candidate_id"])
+        summary = str(recommended_candidate["summary"])
     else:
-        action_id = recommended_action.action_id
-        action_type = recommended_action.action_type
+        selection_id = recommended_candidate.candidate_id
+        summary = recommended_candidate.summary
     output_fn(
-        f"HITL Gate: recommended action {action_id} ({action_type}).",
+        f"HITL Gate: recommended candidate {selection_id} - {summary}",
         flush=True,
     )
     output_fn("Enter 1 to approve or 2 to reject.", flush=True)
@@ -3572,8 +3619,8 @@ def _continue_with_interactive_hitl(
             return run_recovery_from_saved_plan(
                 payload,
                 planning_result,
-                approve_action_id=action_id,
-                engine_mode=str(planning_result.get("engine_mode", "v1")),
+                approve_action_id=selection_id,
+                engine_mode=str(planning_result.get("engine_mode", DEFAULT_ENGINE_MODE)),
                 kubernetes_client=kubernetes_client,
                 prometheus_client=prometheus_client,
                 execution_worker_client=execution_worker_client,
@@ -3582,8 +3629,8 @@ def _continue_with_interactive_hitl(
             return run_recovery_from_saved_plan(
                 payload,
                 planning_result,
-                reject_action_id=action_id,
-                engine_mode=str(planning_result.get("engine_mode", "v1")),
+                reject_action_id=selection_id,
+                engine_mode=str(planning_result.get("engine_mode", DEFAULT_ENGINE_MODE)),
                 kubernetes_client=kubernetes_client,
                 prometheus_client=prometheus_client,
                 execution_worker_client=execution_worker_client,

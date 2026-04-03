@@ -2,9 +2,9 @@
   "scenario_id": "crashloop_recovered",
   "description": "Crashloop recovery succeeds after approval and rollout convergence.",
   "payload_file": "payloads/crashloop_alert.json",
-  "approve_action_id": "rollout_undo_cartservice",
+  "approve_action_id": "reasoner-rollout-undo-cartservice",
   "prometheus": {
-    "crashloop_values": [1.0, 0.0],
+    "crashloop_values": [1.0, 1.0, 0.0],
     "ready_values": [1.0],
     "pre_check_retry_attempts": 1,
     "post_check_retry_attempts": 1
@@ -29,7 +29,7 @@
     }
   },
   "expected": {
-    "top_action_id": "rollout_undo_cartservice",
+    "top_action_id": "reasoner-rollout-undo-cartservice",
     "requires_approval": true,
     "final_state": "recovered"
   }

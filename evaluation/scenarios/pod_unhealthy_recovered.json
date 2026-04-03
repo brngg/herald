@@ -1,0 +1,49 @@
+{
+  "scenario_id": "pod_unhealthy_recovered",
+  "payload_file": "payloads/pod_unhealthy_alert.json",
+  "approve_action_id": "reasoner-delete-pod-cartservice-abcde",
+  "prometheus": {
+    "ready_values": [0.0, 0.0, 1.0],
+    "pre_check_retry_attempts": 1,
+    "post_check_retry_attempts": 1
+  },
+  "kubernetes": {
+    "pods": {
+      "returncode": 0,
+      "stdout": "{\"items\":[{\"metadata\":{\"name\":\"cartservice-abcde\"},\"status\":{\"phase\":\"Running\",\"containerStatuses\":[{\"ready\":false,\"restartCount\":4,\"state\":{\"waiting\":{\"reason\":\"CrashLoopBackOff\"}}}]}}]}",
+      "stderr": ""
+    },
+    "pod_context": {
+      "returncode": 0,
+      "stdout": "{\"metadata\":{\"name\":\"cartservice-abcde\"},\"status\":{\"phase\":\"Running\"}}",
+      "stderr": ""
+    },
+    "deployment": {
+      "returncode": 0,
+      "stdout": "{\"metadata\":{\"name\":\"cartservice\",\"generation\":9},\"spec\":{\"replicas\":2,\"template\":{\"spec\":{\"containers\":[{\"image\":\"example.com/cartservice:v2\"}]}}},\"status\":{\"updatedReplicas\":2,\"readyReplicas\":1,\"availableReplicas\":1,\"observedGeneration\":9}}",
+      "stderr": ""
+    },
+    "replica_sets": {
+      "returncode": 0,
+      "stdout": "{\"items\":[]}",
+      "stderr": ""
+    },
+    "rollout_history": {
+      "returncode": 0,
+      "stdout": "deployment.apps/cartservice\nREVISION  CHANGE-CAUSE\n7         healthy\n",
+      "stderr": ""
+    }
+  },
+  "worker_result": {
+    "status": "succeeded",
+    "returncode": 0,
+    "stdout": "pod \"cartservice-abcde\" deleted\n",
+    "stderr": "",
+    "summary": "Agent deleted the isolated unhealthy pod."
+  },
+  "expected": {
+    "top_action_id": "reasoner-delete-pod-cartservice-abcde",
+    "requires_approval": true,
+    "final_state": "recovered"
+  }
+}

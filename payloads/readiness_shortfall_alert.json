@@ -1,0 +1,42 @@
+{
+  "receiver": "default/herald-webhook-routing/herald-webhook",
+  "status": "firing",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HeraldDeploymentReadinessShortfall",
+        "incident_class": "readiness_shortfall",
+        "namespace": "default",
+        "deployment": "frontend",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "frontend has no ready replicas",
+        "description": "Frontend needs bounded capacity restored."
+      },
+      "startsAt": "2026-03-23T20:00:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus/graph",
+      "fingerprint": "readiness123"
+    }
+  ],
+  "groupLabels": {
+    "alertname": "HeraldDeploymentReadinessShortfall",
+    "incident_class": "readiness_shortfall",
+    "namespace": "default"
+  },
+  "commonLabels": {
+    "alertname": "HeraldDeploymentReadinessShortfall",
+    "incident_class": "readiness_shortfall",
+    "namespace": "default",
+    "severity": "warning"
+  },
+  "commonAnnotations": {
+    "summary": "frontend has no ready replicas"
+  },
+  "externalURL": "http://alertmanager",
+  "version": "4",
+  "groupKey": "{}/{namespace=\"default\"}:{alertname=\"HeraldDeploymentReadinessShortfall\"}",
+  "truncatedAlerts": 0
+}

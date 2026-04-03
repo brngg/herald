@@ -232,6 +232,11 @@ def build_execution_result_for_candidate(
         result["legacy_action_hint"] = dict(candidate.legacy_action_hint)
     if dispatch.action_type in {"delete_stresschaos", "delete_networkchaos"}:
         result["name"] = str(dispatch.parameters["name"])
+    elif dispatch.action_type == "delete_pod":
+        result["pod"] = str(dispatch.parameters["pod"])
+        deployment = dispatch.parameters.get("deployment")
+        if isinstance(deployment, str) and deployment:
+            result["deployment"] = deployment
     else:
         result["deployment"] = str(dispatch.parameters["deployment"])
     if dispatch.action_type == "scale_deployment":
@@ -257,6 +262,11 @@ def allowed_tool_names_for_action(action_type: str) -> list[str]:
             "get_deployment_context",
             "get_rollout_status",
             "scale_deployment",
+        ]
+    if action_type == "delete_pod":
+        return [
+            "get_pod_context",
+            "delete_pod",
         ]
     if action_type == "delete_stresschaos":
         return [
@@ -407,6 +417,11 @@ def build_execution_result(
         result["execution_plan"] = execution_plan
     if action.action_type in {"delete_stresschaos", "delete_networkchaos"}:
         result["name"] = str(action.parameters["name"])
+    elif action.action_type == "delete_pod":
+        result["pod"] = str(action.parameters["pod"])
+        deployment = action.parameters.get("deployment")
+        if isinstance(deployment, str) and deployment:
+            result["deployment"] = deployment
     else:
         result["deployment"] = str(action.parameters["deployment"])
     if action.action_type == "scale_deployment":

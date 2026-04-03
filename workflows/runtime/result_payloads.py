@@ -36,21 +36,13 @@ def build_result(
     synthesizer_state = fixer_state.get("_synthesizer_state")
     verifier_state = fixer_state.get("_verifier_state")
     replanner_state = fixer_state.get("_replanner_state")
-    engine_mode = str(fixer_state.get("_engine_mode", "v1"))
-    if engine_mode == "v1":
-        hitl_payload = {
-            "routing_decision": hitl_decision.routing_decision,
-            "requires_approval": hitl_decision.requires_approval,
-            "recommended_action": hitl_decision.recommended_action,
-            "candidate_actions": hitl_decision.candidate_actions,
-        }
-    else:
-        hitl_payload = {
-            "routing_decision": hitl_decision.routing_decision,
-            "requires_approval": hitl_decision.requires_approval,
-            "recommended_candidate": hitl_decision.recommended_candidate,
-            "candidate_options": hitl_decision.candidate_options,
-        }
+    engine_mode = str(fixer_state.get("_engine_mode", "v2_execute"))
+    hitl_payload = {
+        "routing_decision": hitl_decision.routing_decision,
+        "requires_approval": hitl_decision.requires_approval,
+        "recommended_candidate": hitl_decision.recommended_candidate,
+        "candidate_options": hitl_decision.candidate_options,
+    }
     return {
         "incident": incident,
         "engine_mode": engine_mode,

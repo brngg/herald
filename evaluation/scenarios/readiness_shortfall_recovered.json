@@ -1,0 +1,44 @@
+{
+  "scenario_id": "readiness_shortfall_recovered",
+  "payload_file": "payloads/readiness_shortfall_alert.json",
+  "approve_action_id": "reasoner-scale-frontend-1",
+  "prometheus": {
+    "ready_values": [0.0, 0.0, 1.0],
+    "pre_check_retry_attempts": 1,
+    "post_check_retry_attempts": 1
+  },
+  "kubernetes": {
+    "pods": {
+      "returncode": 0,
+      "stdout": "{\"items\":[]}",
+      "stderr": ""
+    },
+    "deployment": {
+      "returncode": 0,
+      "stdout": "{\"metadata\":{\"name\":\"frontend\",\"generation\":7},\"spec\":{\"replicas\":0,\"template\":{\"spec\":{\"containers\":[{\"image\":\"example.com/frontend:v1\"}]}}},\"status\":{\"updatedReplicas\":0,\"readyReplicas\":0,\"availableReplicas\":0,\"observedGeneration\":7}}",
+      "stderr": ""
+    },
+    "replica_sets": {
+      "returncode": 0,
+      "stdout": "{\"items\":[]}",
+      "stderr": ""
+    },
+    "rollout_history": {
+      "returncode": 0,
+      "stdout": "deployment.apps/frontend\nREVISION  CHANGE-CAUSE\n1         baseline\n",
+      "stderr": ""
+    }
+  },
+  "worker_result": {
+    "status": "succeeded",
+    "returncode": 0,
+    "stdout": "deployment.apps/frontend scaled\n",
+    "stderr": "",
+    "summary": "Agent completed the approved scale remediation."
+  },
+  "expected": {
+    "top_action_id": "reasoner-scale-frontend-1",
+    "requires_approval": true,
+    "final_state": "recovered"
+  }
+}

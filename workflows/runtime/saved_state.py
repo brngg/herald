@@ -91,8 +91,6 @@ def hitl_decision_from_saved(
     return HITLDecision(
         routing_decision=str(value["routing_decision"]),
         requires_approval=bool(value["requires_approval"]),
-        recommended_action=recommended_action,
-        candidate_actions=candidate_actions,
         recommended_candidate=recommended_candidate,
         candidate_options=candidate_options,
         decision_trace=decision_trace,

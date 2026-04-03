@@ -152,6 +152,33 @@ def _compile_command(
             ),
         )
 
+    if intent.operation_family == "pod.delete_stateless_pod":
+        if namespace is None or name is None:
+            return None, [], [], "", ""
+        deployment = intent.arguments.get("deployment")
+        if not isinstance(deployment, str) or not deployment:
+            return None, [], [], "", ""
+        if intent.arguments.get("stateless_workload") is not True:
+            return None, [], [], "", ""
+        command = [
+            "kubectl",
+            "delete",
+            "pod",
+            name,
+            "-n",
+            namespace,
+        ]
+        return (
+            "delete_pod",
+            command,
+            ["get_pod_context", "delete_pod"],
+            "Delete the approved stateless Pod so its Deployment can recreate it.",
+            (
+                f"Shadow execution plan to delete Pod {name} in namespace {namespace} "
+                f"and let Deployment {deployment} recreate it."
+            ),
+        )
+
     if intent.operation_family == "chaos.delete_stresschaos":
         if namespace is None or name is None:
             return None, [], [], "", ""
@@ -215,8 +242,14 @@ def _dispatch_parameters(plan: ExecutionPlan) -> dict[str, Any]:
     if target.name is not None:
         if plan.operation_family in {"chaos.delete_stresschaos", "chaos.delete_networkchaos"}:
             parameters["name"] = target.name
+        elif plan.operation_family == "pod.delete_stateless_pod":
+            parameters["pod"] = target.name
         else:
             parameters["deployment"] = target.name
+    if plan.operation_family == "pod.delete_stateless_pod" and plan.steps:
+        deployment = plan.steps[0].verification_hints.get("deployment")
+        if isinstance(deployment, str) and deployment:
+            parameters["deployment"] = deployment
     if plan.operation_family == "scale.deployment" and plan.steps:
         replicas = plan.steps[0].verification_hints.get("target_replicas")
         if isinstance(replicas, int) and not isinstance(replicas, bool):

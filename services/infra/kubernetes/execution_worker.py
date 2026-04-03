@@ -202,6 +202,12 @@ def _build_execution_tools(kubernetes: KubernetesClient) -> dict[ExecutionToolNa
             callable=kubernetes.get_deployment_context,
             mutation=False,
         ),
+        "get_pod_context": ExecutionTool(
+            name="get_pod_context",
+            description="Read the current Kubernetes Pod JSON for the approved workload instance.",
+            callable=kubernetes.get_pod_context,
+            mutation=False,
+        ),
         "get_rollout_status": ExecutionTool(
             name="get_rollout_status",
             description="Read the current rollout status for the approved workload with a short timeout.",
@@ -236,6 +242,12 @@ def _build_execution_tools(kubernetes: KubernetesClient) -> dict[ExecutionToolNa
             name="scale_deployment",
             description="Scale the approved Deployment to the bounded replica target.",
             callable=kubernetes.scale_deployment,
+            mutation=True,
+        ),
+        "delete_pod": ExecutionTool(
+            name="delete_pod",
+            description="Delete the approved stateless Pod so its Deployment can recreate it.",
+            callable=kubernetes.delete_pod,
             mutation=True,
         ),
         "delete_stresschaos": ExecutionTool(

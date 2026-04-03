@@ -18,6 +18,7 @@ class _FakeKubernetesClient:
                 "items": [
                     {
                         "metadata": {"name": "cartservice-abcde"},
+                        "spec": {"nodeName": "minikube"},
                         "status": {
                             "containerStatuses": [
                                 {
@@ -125,6 +126,41 @@ class _FakeKubernetesClient:
             },
         }
 
+    def get_service_context(self, *, namespace: str, service: str) -> dict[str, Any]:
+        return {
+            "status": "succeeded",
+            "namespace": namespace,
+            "service": service,
+            "resource": {
+                "metadata": {"name": service},
+                "spec": {
+                    "type": "ClusterIP",
+                    "selector": {"app": "cartservice"},
+                    "ports": [
+                        {"name": "grpc", "port": 7070, "targetPort": 7070, "protocol": "TCP"}
+                    ],
+                },
+            },
+        }
+
+    def list_endpoint_slices(self, *, namespace: str, service: str) -> dict[str, Any]:
+        return {
+            "status": "succeeded",
+            "namespace": namespace,
+            "service": service,
+            "resource": {
+                "items": [
+                    {
+                        "endpoints": [
+                            {"conditions": {"ready": True}},
+                            {"conditions": {"ready": False}},
+                        ],
+                        "ports": [{"port": 7070}],
+                    }
+                ]
+            },
+        }
+
     def list_replica_sets(self, *, namespace: str, label_selector: str | None = None) -> dict[str, Any]:
         return {
             "status": "succeeded",
@@ -149,6 +185,89 @@ class _FakeKubernetesClient:
                         "status": {"readyReplicas": 0, "availableReplicas": 0},
                     },
                 ]
+            },
+        }
+
+    def get_config_map_context(self, *, namespace: str, name: str) -> dict[str, Any]:
+        return {
+            "status": "succeeded",
+            "namespace": namespace,
+            "name": name,
+            "resource": {
+                "metadata": {"name": name},
+                "data": {"CONFIG_VALUE": "example"},
+            },
+        }
+
+    def get_secret_context_metadata(self, *, namespace: str, name: str) -> dict[str, Any]:
+        return {
+            "status": "succeeded",
+            "namespace": namespace,
+            "name": name,
+            "resource": {
+                "metadata": {"name": name},
+                "type": "Opaque",
+                "data_keys": ["token"],
+            },
+        }
+
+    def get_resource_quotas(self, *, namespace: str) -> dict[str, Any]:
+        return {
+            "status": "succeeded",
+            "namespace": namespace,
+            "resource": {
+                "items": [
+                    {
+                        "metadata": {"name": "default-quota"},
+                        "status": {
+                            "hard": {"limits.cpu": "4"},
+                            "used": {"limits.cpu": "1"},
+                        },
+                    }
+                ]
+            },
+        }
+
+    def list_persistent_volume_claims(self, *, namespace: str) -> dict[str, Any]:
+        return {
+            "status": "succeeded",
+            "namespace": namespace,
+            "resource": {
+                "items": [
+                    {
+                        "metadata": {"name": "cartservice-pvc"},
+                        "status": {"phase": "Bound", "capacity": {"storage": "1Gi"}},
+                    }
+                ]
+            },
+        }
+
+    def list_horizontal_pod_autoscalers(self, *, namespace: str) -> dict[str, Any]:
+        return {
+            "status": "succeeded",
+            "namespace": namespace,
+            "resource": {
+                "items": [
+                    {
+                        "metadata": {"name": "cartservice"},
+                        "status": {"currentReplicas": 1, "desiredReplicas": 1},
+                    }
+                ]
+            },
+        }
+
+    def get_node_conditions(self, *, node: str) -> dict[str, Any]:
+        return {
+            "status": "succeeded",
+            "node": node,
+            "resource": {
+                "metadata": {"name": node},
+                "status": {
+                    "conditions": [
+                        {"type": "Ready", "status": "True"},
+                        {"type": "MemoryPressure", "status": "False"},
+                    ]
+                },
             },
         }
 
@@ -221,6 +340,15 @@ class ClusterObserverTest(unittest.TestCase):
         self.assertIn("pod_status_summary", bundle.kubernetes)
         self.assertIn("event_summary", bundle.kubernetes)
         self.assertIn("endpoint_summary", bundle.kubernetes)
+        self.assertIn("service_summary", bundle.kubernetes)
+        self.assertIn("endpoint_slice_summary", bundle.kubernetes)
+        self.assertIn("dependency_summary", bundle.kubernetes)
+        self.assertIn("config_map_summary", bundle.kubernetes)
+        self.assertIn("secret_summary", bundle.kubernetes)
+        self.assertIn("resource_quota_summary", bundle.kubernetes)
+        self.assertIn("pvc_summary", bundle.kubernetes)
+        self.assertIn("hpa_summary", bundle.kubernetes)
+        self.assertIn("node_condition_summary", bundle.kubernetes)
         self.assertIn("replica_set_summary", bundle.kubernetes)
         self.assertIn("rollout_summary", bundle.kubernetes)
         self.assertIn("ready", bundle.prometheus)
@@ -235,6 +363,17 @@ class ClusterObserverTest(unittest.TestCase):
         self.assertIn("cartservice-volume-secret", bundle.kubernetes["deployment_summary"]["secret_refs"])
         self.assertEqual(bundle.kubernetes["endpoint_summary"]["address_count"], 1)
         self.assertEqual(bundle.kubernetes["endpoint_summary"]["not_ready_address_count"], 1)
+        self.assertEqual(bundle.kubernetes["service_summary"]["selector"]["app"], "cartservice")
+        self.assertEqual(bundle.kubernetes["endpoint_slice_summary"]["ready_endpoint_count"], 1)
+        self.assertEqual(bundle.kubernetes["endpoint_slice_summary"]["not_ready_endpoint_count"], 1)
+        self.assertEqual(bundle.kubernetes["dependency_summary"]["service_port_count"], 1)
+        self.assertEqual(bundle.kubernetes["dependency_summary"]["endpoint_slice_ready_count"], 1)
+        self.assertEqual(bundle.kubernetes["config_map_summary"]["count"], 1)
+        self.assertEqual(bundle.kubernetes["secret_summary"]["count"], 2)
+        self.assertEqual(bundle.kubernetes["resource_quota_summary"]["quota_count"], 1)
+        self.assertEqual(bundle.kubernetes["pvc_summary"]["pvc_count"], 1)
+        self.assertEqual(bundle.kubernetes["hpa_summary"]["hpa_count"], 1)
+        self.assertEqual(bundle.kubernetes["node_condition_summary"]["node_count"], 1)
         self.assertEqual(bundle.kubernetes["replica_set_summary"]["recent_replica_sets"][0]["revision"], 7)
         self.assertEqual(bundle.kubernetes["rollout_summary"]["latest_revision"], 3)
         self.assertEqual(bundle.kubernetes["event_summary"]["warning_count"], 1)

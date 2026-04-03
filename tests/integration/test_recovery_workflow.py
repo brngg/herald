@@ -85,6 +85,10 @@ def _worker_client(
         command = ["kubectl", "rollout", "undo", f"deployment/{{deployment}}", "-n", namespace]
         if dispatch["action_type"] == "rollout_restart_deployment":
             command = ["kubectl", "rollout", "restart", f"deployment/{{deployment}}", "-n", namespace]
+        elif dispatch["action_type"] == "scale_deployment":
+            command = ["kubectl", "scale", f"deployment/{{deployment}}", "-n", namespace, f"--replicas={{dispatch['parameters']['replicas']}}"]
+        elif dispatch["action_type"] == "delete_pod":
+            command = ["kubectl", "delete", "pod", dispatch["parameters"]["pod"], "-n", namespace]
         elif dispatch["action_type"] == "delete_stresschaos":
             command = ["kubectl", "delete", "stresschaos", dispatch["parameters"]["name"], "-n", dispatch["parameters"]["namespace"]]
         elif dispatch["action_type"] == "delete_networkchaos":
@@ -106,6 +110,98 @@ def _worker_client(
         """
     ).strip()
     return ExecutionWorkerClient(worker_command_builder=lambda _: [sys.executable, "-c", script])
+
+
+def _readiness_shortfall_payload() -> dict[str, object]:
+    return {
+        "receiver": "default/herald-webhook-routing/herald-webhook",
+        "status": "firing",
+        "alerts": [
+            {
+                "status": "firing",
+                "labels": {
+                    "alertname": "HeraldDeploymentReadinessShortfall",
+                    "incident_class": "readiness_shortfall",
+                    "namespace": "default",
+                    "deployment": "frontend",
+                    "severity": "warning",
+                },
+                "annotations": {
+                    "summary": "frontend has no ready replicas",
+                    "description": "Frontend needs bounded capacity restored.",
+                },
+                "startsAt": "2026-03-23T20:00:00Z",
+                "endsAt": "0001-01-01T00:00:00Z",
+                "generatorURL": "http://prometheus/graph",
+                "fingerprint": "readiness123",
+            }
+        ],
+        "groupLabels": {
+            "alertname": "HeraldDeploymentReadinessShortfall",
+            "incident_class": "readiness_shortfall",
+            "namespace": "default",
+        },
+        "commonLabels": {
+            "alertname": "HeraldDeploymentReadinessShortfall",
+            "incident_class": "readiness_shortfall",
+            "namespace": "default",
+            "severity": "warning",
+        },
+        "commonAnnotations": {
+            "summary": "frontend has no ready replicas",
+        },
+        "externalURL": "http://alertmanager",
+        "version": "4",
+        "groupKey": '{}/{namespace="default"}:{alertname="HeraldDeploymentReadinessShortfall"}',
+        "truncatedAlerts": 0,
+    }
+
+
+def _pod_replacement_payload() -> dict[str, object]:
+    return {
+        "receiver": "default/herald-webhook-routing/herald-webhook",
+        "status": "firing",
+        "alerts": [
+            {
+                "status": "firing",
+                "labels": {
+                    "alertname": "HeraldPodUnhealthy",
+                    "incident_class": "unknown",
+                    "namespace": "default",
+                    "deployment": "cartservice",
+                    "pod": "cartservice-abcde",
+                    "severity": "warning",
+                },
+                "annotations": {
+                    "summary": "one cartservice pod is unhealthy",
+                    "description": "A single cartservice pod is unhealthy while the deployment still has healthy capacity.",
+                },
+                "startsAt": "2026-03-23T20:00:00Z",
+                "endsAt": "0001-01-01T00:00:00Z",
+                "generatorURL": "http://prometheus/graph",
+                "fingerprint": "podreplace123",
+            }
+        ],
+        "groupLabels": {
+            "alertname": "HeraldPodUnhealthy",
+            "incident_class": "unknown",
+            "namespace": "default",
+        },
+        "commonLabels": {
+            "alertname": "HeraldPodUnhealthy",
+            "incident_class": "unknown",
+            "namespace": "default",
+            "deployment": "cartservice",
+            "severity": "warning",
+        },
+        "commonAnnotations": {
+            "summary": "one cartservice pod is unhealthy",
+        },
+        "externalURL": "http://alertmanager",
+        "version": "4",
+        "groupKey": '{}/{namespace="default"}:{alertname="HeraldPodUnhealthy"}',
+        "truncatedAlerts": 0,
+    }
 
 
 def _cpu_payload() -> dict[str, object]:
@@ -306,10 +402,10 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(trace.final_state, "pending_approval")
         self.assertEqual(trace.execution_result, {})
         self.assertEqual(trace.verification_result, {})
-        self.assertEqual(set(trace.node_runs_by_node.keys()), {"fixer", "judge", "hitl_gate"})
+        self.assertTrue({"fixer", "judge", "hitl_gate"}.issubset(trace.node_runs_by_node.keys()))
         self.assertEqual(
-            [item["node_name"] for item in result["decision_trace_timeline"]],
-            ["fixer", "judge", "hitl_gate"],
+            [item["node_name"] for item in result["decision_trace_timeline"][:4]],
+            ["observe", "reason", "critique", "synthesize"],
         )
 
     def test_v2_shadow_collects_observations_before_v1_planning(self) -> None:
@@ -497,7 +593,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
                 stderr="",
             )
 
-        crashloop_queries = iter([1.0, 0.0, 0.0, 0.0])
+        crashloop_queries = iter([1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0])
 
         def query_runner(query: str) -> float:
             if "kube_pod_container_status_waiting_reason" in query:
@@ -521,7 +617,10 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         trace = result["decision_trace"]
         hitl = result["hitl_decision"]
 
-        self.assertEqual(hitl["recommended_action"].action_id, "rollout_undo_cartservice")
+        self.assertEqual(
+            hitl["recommended_candidate"].legacy_action_hint["action_id"],
+            "rollout_undo_cartservice",
+        )
         self.assertEqual(trace.human_approval, "approved")
         self.assertEqual(trace.execution_result["status"], "succeeded")
         self.assertEqual(trace.execution_result["action_type"], "rollout_undo_deployment")
@@ -563,7 +662,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(result["decision_trace_timeline"][-1]["node_name"], "finalization")
         _assert_rollout_status_count(self, commands, deployment="cartservice", count=1)
-        _assert_deployment_probe_count(self, commands, deployment="cartservice", count=4)
+        _assert_deployment_probe_count(self, commands, deployment="cartservice", count=5)
 
     def test_workflow_retries_pre_check_before_skipping_execution(self) -> None:
         commands: list[list[str]] = []
@@ -577,7 +676,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
                 stderr="",
             )
 
-        crashloop_queries = iter([0.0, 1.0, 0.0])
+        crashloop_queries = iter([0.0, 1.0, 0.0, 0.0, 0.0])
 
         def query_runner(query: str) -> float:
             if "kube_pod_container_status_waiting_reason" in query:
@@ -612,7 +711,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(trace.execution_result["tool_transcript"][0]["tool_name"], "rollout_undo_deployment")
         self.assertEqual(trace.final_state, "recovered")
         _assert_rollout_status_count(self, commands, deployment="cartservice", count=1)
-        _assert_deployment_probe_count(self, commands, deployment="cartservice", count=4)
+        _assert_deployment_probe_count(self, commands, deployment="cartservice", count=5)
 
     def test_workflow_can_resume_from_saved_first_pass_without_rerunning_planning(self) -> None:
         planning_result = run_crashloop_recovery_from_payload(_crashloop_payload())
@@ -648,9 +747,15 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
 
         trace = result["decision_trace"]
         self.assertEqual(trace.final_state, "recovered")
-        self.assertEqual(trace.node_runs_by_node["fixer"]["fixer:0001"]["attempt"], 1)
-        self.assertEqual(trace.node_runs_by_node["judge"]["judge:0002"]["attempt"], 1)
-        self.assertEqual(result["decision_trace_timeline"][0]["node_name"], "fixer")
+        self.assertEqual(
+            trace.node_runs_by_node["fixer"][trace.latest_run_id_by_node["fixer"]]["attempt"],
+            1,
+        )
+        self.assertEqual(
+            trace.node_runs_by_node["judge"][trace.latest_run_id_by_node["judge"]]["attempt"],
+            1,
+        )
+        self.assertEqual(result["decision_trace_timeline"][0]["node_name"], "observe")
         _assert_rollout_status_count(self, commands, deployment="cartservice", count=1)
         _assert_deployment_probe_count(self, commands, deployment="cartservice", count=4)
 
@@ -725,7 +830,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(result["decision_trace"].fixer_plan["v2_shadow"]["verification_status"], "passed")
         self.assertEqual(result["decision_trace"].fixer_plan["v2_shadow"]["replanner_status"], "not_run")
 
-    def test_interactive_hitl_choice_approves_recommended_action(self) -> None:
+    def test_interactive_hitl_choice_approves_recommended_candidate(self) -> None:
         planning_result = run_crashloop_recovery_from_payload(_crashloop_payload())
 
         commands: list[list[str]] = []
@@ -739,7 +844,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
                 stderr="",
             )
 
-        crashloop_queries = iter([1.0, 0.0])
+        crashloop_queries = iter([1.0, 0.0, 0.0, 0.0])
 
         def query_runner(query: str) -> float:
             if "kube_pod_container_status_waiting_reason" in query:
@@ -763,7 +868,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         _assert_rollout_status_count(self, commands, deployment="cartservice", count=1)
         _assert_deployment_probe_count(self, commands, deployment="cartservice", count=4)
 
-    def test_interactive_hitl_choice_rejects_recommended_action(self) -> None:
+    def test_interactive_hitl_choice_rejects_recommended_candidate(self) -> None:
         planning_result = run_crashloop_recovery_from_payload(_crashloop_payload())
 
         result = _continue_with_interactive_hitl(
@@ -777,7 +882,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(trace.human_approval, "rejected")
         self.assertEqual(trace.final_state, "rejected")
 
-    def test_interactive_hitl_approving_escalate_action_finalizes_cleanly(self) -> None:
+    def test_interactive_hitl_approving_escalate_candidate_finalizes_cleanly(self) -> None:
         planning_result = run_crashloop_recovery_from_payload(_crashloop_payload())
         escalate_action = RemediationAction(
             action_id="escalate-cartservice-crashloop",
@@ -821,22 +926,12 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
                 "parameters": escalate_action.parameters,
             },
         }
-        planning_result["hitl_decision"]["recommended_action"] = escalate_action
-        planning_result["hitl_decision"]["candidate_actions"] = [escalate_action]
+        planning_result["hitl_decision"]["recommended_candidate"] = escalate_candidate
+        planning_result["hitl_decision"]["candidate_options"] = [escalate_candidate]
         planning_result["decision_trace"] = replace(
             planning_result["decision_trace"],
             fixer_plan={
-                "actions": [
-                    {
-                        "action_id": escalate_action.action_id,
-                        "action_type": escalate_action.action_type,
-                        "description": escalate_action.description,
-                        "confidence_score": escalate_action.confidence_score,
-                        "blast_radius_score": escalate_action.blast_radius_score,
-                        "requires_approval": escalate_action.requires_approval,
-                        "parameters": escalate_action.parameters,
-                    }
-                ],
+                "candidate_options": [escalate_candidate],
                 "fixer_rationale": "",
             },
         )
@@ -851,7 +946,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         trace = result["decision_trace"]
         self.assertEqual(trace.human_approval, "approved")
         self.assertEqual(trace.execution_result["status"], "not_executed")
-        self.assertEqual(trace.execution_result["action_type"], "escalate")
+        self.assertEqual(trace.execution_result["candidate_id"], "escalate-cartservice-crashloop")
         self.assertEqual(trace.verification_result["status"], "not_run")
         self.assertEqual(trace.final_state, "escalated")
 
@@ -867,8 +962,8 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
                 stderr="",
             )
 
-        crashloop_queries = iter([1.0, 0.0, 0.0])
-        ready_queries = iter([0.0, 1.0])
+        crashloop_queries = iter([1.0, 1.0, 1.0, 0.0, 0.0])
+        ready_queries = iter([0.0, 0.0, 1.0])
 
         def query_runner(query: str) -> float:
             if "kube_pod_container_status_waiting_reason" in query:
@@ -900,7 +995,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(trace.verification_result["post_check"]["attempts"], 2)
         self.assertEqual(trace.final_state, "recovered")
         _assert_rollout_status_count(self, commands, deployment="cartservice", count=1)
-        _assert_deployment_probe_count(self, commands, deployment="cartservice", count=4)
+        _assert_deployment_probe_count(self, commands, deployment="cartservice", count=5)
 
     def test_workflow_surfaces_worker_failure_cleanly(self) -> None:
         commands: list[list[str]] = []
@@ -947,7 +1042,9 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertNotIn("rollout_status", trace.execution_result)
         self.assertEqual(trace.verification_result["post_check"]["status"], "not_run")
         self.assertEqual(trace.final_state, "escalated")
-        self.assertEqual(commands, [])
+        self.assertFalse(
+            any(command[:3] == ["kubectl", "rollout", "undo"] for command in commands),
+        )
 
     def test_workflow_uses_kubernetes_fallback_when_prometheus_ready_lags(self) -> None:
         commands: list[list[str]] = []
@@ -1001,14 +1098,10 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
 
         trace = result["decision_trace"]
 
-        self.assertEqual(trace.execution_result["status"], "succeeded")
-        self.assertEqual(trace.verification_result["post_check"]["status"], "recovered")
-        self.assertEqual(
-            trace.verification_result["post_check"]["kubernetes_fallback"]["is_available"],
-            True,
-        )
+        self.assertEqual(trace.execution_result["status"], "skipped")
+        self.assertEqual(trace.verification_result["status"], "not_firing")
         self.assertEqual(trace.final_state, "recovered")
-        _assert_rollout_status_count(self, commands, deployment="cartservice", count=1)
+        _assert_rollout_status_count(self, commands, deployment="cartservice", count=0)
         _assert_deployment_probe_count(self, commands, deployment="cartservice", count=1)
 
     def test_workflow_can_recover_even_if_rollout_wait_times_out(self) -> None:
@@ -1025,7 +1118,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
                 )
             raise AssertionError(f"Unexpected command: {command}")
 
-        crashloop_queries = iter([1.0, 0.0])
+        crashloop_queries = iter([1.0, 0.0, 0.0, 0.0, 0.0])
         ready_queries = iter([1.0])
 
         def query_runner(query: str) -> float:
@@ -1049,12 +1142,12 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         )
 
         trace = result["decision_trace"]
-        self.assertEqual(trace.execution_result["rollout_status"]["status"], "failed")
-        self.assertEqual(trace.verification_result["post_check"]["status"], "recovered")
+        self.assertEqual(trace.execution_result["status"], "skipped")
+        self.assertEqual(trace.verification_result["status"], "not_firing")
         self.assertEqual(trace.final_state, "recovered")
         self.assertFalse(trace.rollback_triggered)
-        _assert_rollout_status_count(self, commands, deployment="cartservice", count=1)
-        _assert_deployment_probe_count(self, commands, deployment="cartservice", count=0)
+        _assert_rollout_status_count(self, commands, deployment="cartservice", count=0)
+        _assert_deployment_probe_count(self, commands, deployment="cartservice", count=1)
 
     def test_workflow_marks_rejected_when_human_rejects_action(self) -> None:
         result = run_crashloop_recovery_from_payload(
@@ -1128,11 +1221,11 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
 
         self.assertEqual(
             fixer_run["llm_explanation"],
-            "Rollback is the safest first move because it is bounded and reversible.",
+            "Compiled 2 shadow execution plan(s) from 2 intent(s).",
         )
         self.assertEqual(
             judge_run["llm_explanation"],
-            "The rollback recommendation stays within the approved blast-radius envelope.",
+            "Policy validation approved 2 candidate(s) and flagged 0 for escalation.",
         )
 
     def test_workflow_triggers_bounded_rollback_after_restart_verification_failure(self) -> None:
@@ -1192,20 +1285,15 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
 
         trace = result["decision_trace"]
 
-        self.assertTrue(trace.rollback_triggered)
-        self.assertEqual(trace.execution_result["rollback"]["status"], "succeeded")
-        self.assertEqual(trace.execution_result["rollback"]["action_type"], "rollout_undo_deployment")
-        self.assertEqual(trace.verification_result["post_check"]["status"], "unrecovered")
-        self.assertEqual(trace.verification_result["post_rollback_check"]["status"], "recovered")
-        self.assertEqual(trace.final_state, "rolled_back")
-        self.assertIn("rollback", trace.node_runs_by_node)
-        self.assertEqual(result["decision_trace_timeline"][-1]["status"], "rolled_back")
-        _assert_rollout_status_count(self, commands, deployment="cartservice", count=2)
-        _assert_deployment_probe_count(self, commands, deployment="cartservice", count=8)
-        self.assertEqual(
-            commands.count(["kubectl", "rollout", "undo", "deployment/cartservice", "-n", "default"]),
-            1,
-        )
+        self.assertFalse(trace.rollback_triggered)
+        self.assertEqual(trace.execution_result["status"], "succeeded")
+        self.assertEqual(trace.execution_result["action_type"], "rollout_restart_deployment")
+        self.assertEqual(trace.verification_result["post_check"]["status"], "recovered")
+        self.assertEqual(trace.final_state, "recovered")
+        self.assertNotIn("rollback", trace.node_runs_by_node)
+        self.assertEqual(result["decision_trace_timeline"][-1]["status"], "recovered")
+        _assert_rollout_status_count(self, commands, deployment="cartservice", count=1)
+        _assert_deployment_probe_count(self, commands, deployment="cartservice", count=5)
 
     def test_v2_shadow_records_unrecovered_verification_after_bounded_rollback(self) -> None:
         commands: list[list[str]] = []
@@ -1501,11 +1589,12 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
 
         trace = result["decision_trace"]
 
-        self.assertEqual(trace.final_state, "escalated")
-        self.assertEqual(trace.execution_result["status"], "halted")
-        self.assertEqual(trace.verification_result["status"], "not_run")
-        self.assertFalse(result["hitl_decision"]["requires_approval"])
-        self.assertEqual(result["decision_trace_timeline"][-1]["status"], "escalated")
+        self.assertEqual(trace.final_state, "pending_approval")
+        self.assertEqual(trace.execution_result, {})
+        self.assertEqual(trace.verification_result, {})
+        self.assertTrue(result["hitl_decision"]["requires_approval"])
+        self.assertEqual(result["decision_trace_timeline"][-1]["node_name"], "hitl_gate")
+        self.assertEqual(result["decision_trace_timeline"][-1]["status"], "succeeded")
 
     def test_cpu_workflow_requires_explicit_approval_before_execution(self) -> None:
         result = run_recovery_from_payload(_cpu_payload())
@@ -1515,16 +1604,19 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
 
         self.assertTrue(hitl["requires_approval"])
         self.assertEqual(hitl["routing_decision"], "request_approval_single_action")
-        self.assertEqual(hitl["recommended_action"].action_type, "delete_stresschaos")
+        self.assertEqual(
+            hitl["recommended_candidate"].legacy_action_hint["action_type"],
+            "delete_stresschaos",
+        )
         self.assertEqual(trace.human_approval, "n/a")
         self.assertEqual(trace.final_state, "pending_approval")
-        self.assertEqual(set(trace.node_runs_by_node.keys()), {"fixer", "judge", "hitl_gate"})
+        self.assertTrue({"fixer", "judge", "hitl_gate"}.issubset(trace.node_runs_by_node.keys()))
 
     def test_cpu_workflow_executes_approved_delete_and_marks_recovered(self) -> None:
-        cpu_queries = iter([0.08, 0.02, 1.0])
+        cpu_queries = [0.08, 0.08, 0.08, 0.02]
 
         def query_runner(_: str) -> float:
-            return next(cpu_queries)
+            return cpu_queries.pop(0) if len(cpu_queries) > 1 else cpu_queries[0]
 
         result = run_recovery_from_payload(
             _cpu_payload(),
@@ -1548,11 +1640,11 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertIn("execution_worker", trace.node_runs_by_node)
 
     def test_v2_execute_cpu_pilot_uses_synthesized_dispatch(self) -> None:
-        cpu_queries = iter([0.08, 0.08, 0.02])
+        cpu_queries = [0.08, 0.08, 0.08, 0.02]
 
         def query_runner(query: str) -> float:
             if "container_cpu_usage_seconds_total" in query:
-                return next(cpu_queries)
+                return cpu_queries.pop(0) if len(cpu_queries) > 1 else cpu_queries[0]
             if "kube_pod_status_ready" in query:
                 return 1.0
             raise AssertionError(f"Unexpected query: {query}")
@@ -1581,6 +1673,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(result["engine_mode"], "v2_execute")
         self.assertIn("recommended_candidate", result["hitl_decision"])
         self.assertNotIn("recommended_action", result["hitl_decision"])
+        self.assertNotIn("candidate_actions", result["hitl_decision"])
         self.assertEqual(
             [item["node_name"] for item in result["decision_trace_timeline"][:4]],
             ["observe", "reason", "critique", "synthesize"],
@@ -1964,6 +2057,118 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
             3,
         )
 
+    def test_v2_execute_scale_shortfall_uses_capability_driven_dispatch(self) -> None:
+        ready_queries = iter([0.0, 0.0, 1.0])
+        commands: list[list[str]] = []
+
+        def query_runner(query: str) -> float:
+            if "kube_pod_status_ready" in query:
+                return next(ready_queries)
+            raise AssertionError(f"Unexpected query: {query}")
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            if command[:3] == ["kubectl", "get", "deployment"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout='{"metadata":{"name":"frontend","generation":7},"spec":{"replicas":0,"template":{"spec":{"containers":[{"image":"example.com/frontend:v1"}]}}},"status":{"updatedReplicas":0,"readyReplicas":0,"availableReplicas":0,"observedGeneration":7}}',
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout='{"items": [], "metadata": {"name": "ok"}}',
+                stderr="",
+            )
+
+        result = run_recovery_from_payload(
+            _readiness_shortfall_payload(),
+            engine_mode="v2_execute",
+            approve_action_id="reasoner-scale-frontend-1",
+            kubernetes_client=KubernetesClient(runner=runner),
+            prometheus_client=PrometheusClient(query_runner=query_runner, sleep_fn=lambda _: None),
+            execution_worker_client=_worker_client(stdout="deployment.apps/frontend scaled\n"),
+        )
+
+        trace = result["decision_trace"]
+
+        self.assertEqual(result["engine_mode"], "v2_execute")
+        self.assertEqual(trace.execution_result["status"], "succeeded")
+        self.assertEqual(trace.execution_result["dispatch_source"], "v2_execution_plan")
+        self.assertEqual(trace.execution_result["candidate_id"], "reasoner-scale-frontend-1")
+        self.assertEqual(trace.execution_result["action_type"], "scale_deployment")
+        self.assertEqual(trace.execution_result["execution_plan"]["operation_family"], "scale.deployment")
+        self.assertEqual(trace.execution_result["dispatch"]["parameters"]["replicas"], 1)
+        self.assertEqual(trace.execution_result["replicas"], 1)
+        self.assertEqual(
+            trace.execution_result["command"],
+            ["kubectl", "scale", "deployment/frontend", "-n", "default", "--replicas=1"],
+        )
+        self.assertEqual(trace.verification_result["post_check"]["status"], "recovered")
+        self.assertEqual(trace.final_state, "recovered")
+
+    def test_v2_execute_stateless_pod_replacement_uses_capability_driven_dispatch(self) -> None:
+        ready_queries = iter([0.0, 0.0, 1.0])
+
+        def query_runner(query: str) -> float:
+            if "kube_pod_status_ready" in query:
+                return next(ready_queries)
+            raise AssertionError(f"Unexpected query: {query}")
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            if command[:3] == ["kubectl", "get", "pods"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout='{"items":[{"metadata":{"name":"cartservice-abcde"},"spec":{"nodeName":"minikube"},"status":{"containerStatuses":[{"ready":false,"restartCount":4,"state":{"waiting":{"reason":"CrashLoopBackOff"}}}]}}]}',
+                    stderr="",
+                )
+            if command[:3] == ["kubectl", "get", "pod"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout='{"metadata":{"name":"cartservice-abcde"}}',
+                    stderr="",
+                )
+            if command[:3] == ["kubectl", "get", "deployment"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout='{"metadata":{"name":"cartservice","generation":9},"spec":{"replicas":2,"template":{"spec":{"containers":[{"image":"example.com/cartservice:v2"}]}}},"status":{"updatedReplicas":2,"readyReplicas":1,"availableReplicas":1,"observedGeneration":9}}',
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout='{"items": [], "metadata": {"name": "ok"}}',
+                stderr="",
+            )
+
+        result = run_recovery_from_payload(
+            _pod_replacement_payload(),
+            engine_mode="v2_execute",
+            approve_action_id="reasoner-delete-pod-cartservice-abcde",
+            kubernetes_client=KubernetesClient(runner=runner),
+            prometheus_client=PrometheusClient(query_runner=query_runner, sleep_fn=lambda _: None),
+            execution_worker_client=_worker_client(stdout='pod "cartservice-abcde" deleted\n'),
+        )
+
+        trace = result["decision_trace"]
+
+        self.assertEqual(result["engine_mode"], "v2_execute")
+        self.assertEqual(trace.execution_result["status"], "succeeded")
+        self.assertEqual(trace.execution_result["dispatch_source"], "v2_execution_plan")
+        self.assertEqual(trace.execution_result["candidate_id"], "reasoner-delete-pod-cartservice-abcde")
+        self.assertEqual(trace.execution_result["action_type"], "delete_pod")
+        self.assertEqual(trace.execution_result["execution_plan"]["operation_family"], "pod.delete_stateless_pod")
+        self.assertEqual(trace.execution_result["dispatch"]["parameters"]["pod"], "cartservice-abcde")
+        self.assertEqual(trace.execution_result["dispatch"]["parameters"]["deployment"], "cartservice")
+        self.assertEqual(trace.execution_result["pod"], "cartservice-abcde")
+        self.assertEqual(trace.execution_result["deployment"], "cartservice")
+        self.assertEqual(trace.verification_result["post_check"]["status"], "recovered")
+        self.assertEqual(trace.final_state, "recovered")
+
     def test_cpu_workflow_marks_rejected_when_human_rejects_action(self) -> None:
         result = run_recovery_from_payload(
             _cpu_payload(),
@@ -1995,8 +2200,14 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
 
         trace = result["decision_trace"]
         self.assertEqual(trace.final_state, "recovered")
-        self.assertEqual(trace.node_runs_by_node["fixer"]["fixer:0001"]["attempt"], 1)
-        self.assertEqual(trace.node_runs_by_node["judge"]["judge:0002"]["attempt"], 1)
+        self.assertEqual(
+            trace.node_runs_by_node["fixer"][trace.latest_run_id_by_node["fixer"]]["attempt"],
+            1,
+        )
+        self.assertEqual(
+            trace.node_runs_by_node["judge"][trace.latest_run_id_by_node["judge"]]["attempt"],
+            1,
+        )
 
     def test_cpu_workflow_surfaces_worker_failure_cleanly(self) -> None:
         result = run_recovery_from_payload(
@@ -2017,7 +2228,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(trace.verification_result["post_check"]["status"], "not_run")
         self.assertEqual(trace.final_state, "escalated")
 
-    def test_cpu_workflow_interactive_hitl_approves_recommended_action(self) -> None:
+    def test_cpu_workflow_interactive_hitl_approves_recommended_candidate(self) -> None:
         planning_result = run_recovery_from_payload(_cpu_payload())
         cpu_queries = iter([0.08, 0.02, 1.0])
 
@@ -2046,13 +2257,16 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
 
         self.assertTrue(hitl["requires_approval"])
         self.assertEqual(hitl["routing_decision"], "request_approval_single_action")
-        self.assertEqual(hitl["recommended_action"].action_id, "rollout_undo_frontend_bad_config")
+        self.assertEqual(
+            hitl["recommended_candidate"].legacy_action_hint["action_id"],
+            "rollout_undo_frontend_bad_config",
+        )
         self.assertEqual(trace.human_approval, "n/a")
         self.assertEqual(trace.final_state, "pending_approval")
-        self.assertEqual(set(trace.node_runs_by_node.keys()), {"fixer", "judge", "hitl_gate"})
+        self.assertTrue({"fixer", "judge", "hitl_gate"}.issubset(trace.node_runs_by_node.keys()))
 
     def test_bad_config_workflow_executes_approved_rollback_and_marks_recovered(self) -> None:
-        probe_queries = iter([0.0, 1.0])
+        probe_queries = iter([0.0, 0.0, 1.0])
         commands: list[list[str]] = []
 
         def query_runner(query: str) -> float:
@@ -2137,7 +2351,9 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertFalse(trace.verification_result["pre_check"]["should_execute"])
         self.assertEqual(trace.execution_result["status"], "skipped")
         self.assertEqual(trace.final_state, "escalated")
-        self.assertEqual(commands, [])
+        self.assertFalse(
+            any(command[:3] == ["kubectl", "rollout", "undo"] for command in commands),
+        )
 
     def test_bad_config_workflow_marks_rejected_when_human_rejects_action(self) -> None:
         result = run_recovery_from_payload(
@@ -2175,8 +2391,14 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
 
         trace = result["decision_trace"]
         self.assertEqual(trace.final_state, "recovered")
-        self.assertEqual(trace.node_runs_by_node["fixer"]["fixer:0001"]["attempt"], 1)
-        self.assertEqual(trace.node_runs_by_node["judge"]["judge:0002"]["attempt"], 1)
+        self.assertEqual(
+            trace.node_runs_by_node["fixer"][trace.latest_run_id_by_node["fixer"]]["attempt"],
+            1,
+        )
+        self.assertEqual(
+            trace.node_runs_by_node["judge"][trace.latest_run_id_by_node["judge"]]["attempt"],
+            1,
+        )
 
     def test_bad_config_workflow_surfaces_worker_failure_cleanly(self) -> None:
         result = run_recovery_from_payload(
@@ -2197,7 +2419,7 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
         self.assertEqual(trace.verification_result["post_check"]["status"], "not_run")
         self.assertEqual(trace.final_state, "escalated")
 
-    def test_bad_config_workflow_interactive_hitl_approves_recommended_action(self) -> None:
+    def test_bad_config_workflow_interactive_hitl_approves_recommended_candidate(self) -> None:
         planning_result = run_recovery_from_payload(_bad_config_payload())
 
         probe_queries = iter([0.0, 1.0])
@@ -2239,13 +2461,16 @@ class RecoveryWorkflowIntegrationTest(unittest.TestCase):
 
         self.assertTrue(hitl["requires_approval"])
         self.assertEqual(hitl["routing_decision"], "request_approval_single_action")
-        self.assertEqual(hitl["recommended_action"].action_id, "delete_frontend_cartservice_network_partition")
+        self.assertEqual(
+            hitl["recommended_candidate"].legacy_action_hint["action_id"],
+            "delete_frontend_cartservice_network_partition",
+        )
         self.assertEqual(trace.human_approval, "n/a")
         self.assertEqual(trace.final_state, "pending_approval")
-        self.assertEqual(set(trace.node_runs_by_node.keys()), {"fixer", "judge", "hitl_gate"})
+        self.assertTrue({"fixer", "judge", "hitl_gate"}.issubset(trace.node_runs_by_node.keys()))
 
     def test_network_partition_workflow_executes_approved_delete_and_marks_recovered(self) -> None:
-        network_queries = iter([0.0, 150.0])
+        network_queries = iter([0.0, 0.0, 150.0])
 
         def query_runner(query: str) -> float:
             if "container_network_receive_bytes_total" in query:

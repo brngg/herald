@@ -21,6 +21,9 @@ class RunScenarioIntegrationTest(unittest.TestCase):
             repo_root / "evaluation" / "scenarios" / "frontend_cartservice_network_partition_recovered.json",
             repo_root / "evaluation" / "scenarios" / "frontend_cartservice_network_partition_rejected.json",
             repo_root / "evaluation" / "scenarios" / "frontend_cartservice_network_partition_worker_failure.json",
+            repo_root / "evaluation" / "scenarios" / "readiness_shortfall_recovered.json",
+            repo_root / "evaluation" / "scenarios" / "pod_unhealthy_recovered.json",
+            repo_root / "evaluation" / "scenarios" / "unknown_dependency_escalated.json",
         ]
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -31,7 +34,7 @@ class RunScenarioIntegrationTest(unittest.TestCase):
             )
 
             self.assertEqual(summary["runs_per_scenario"], 1)
-            self.assertEqual(summary["metrics"]["total_runs"], 9)
+            self.assertEqual(summary["metrics"]["total_runs"], 12)
             self.assertTrue((Path(temp_dir) / "crashloop_recovered-run-01.json").exists())
             self.assertTrue((Path(temp_dir) / "crashloop_worker_failure-run-01.json").exists())
             self.assertTrue((Path(temp_dir) / "frontend_cpu_recovered-run-01.json").exists())
@@ -43,6 +46,9 @@ class RunScenarioIntegrationTest(unittest.TestCase):
             self.assertTrue(
                 (Path(temp_dir) / "frontend_cartservice_network_partition_worker_failure-run-01.json").exists()
             )
+            self.assertTrue((Path(temp_dir) / "readiness_shortfall_recovered-run-01.json").exists())
+            self.assertTrue((Path(temp_dir) / "pod_unhealthy_recovered-run-01.json").exists())
+            self.assertTrue((Path(temp_dir) / "unknown_dependency_escalated-run-01.json").exists())
             self.assertTrue((Path(temp_dir) / "metrics-summary.json").exists())
             self.assertTrue((Path(temp_dir) / "metrics-summary.md").exists())
             with (Path(temp_dir) / "crashloop_recovered-run-01.json").open("r", encoding="utf-8") as handle:

@@ -8,6 +8,7 @@ OperationFamily = Literal[
     "rollout.undo_deployment",
     "rollout.restart_deployment",
     "scale.deployment",
+    "pod.delete_stateless_pod",
     "chaos.delete_stresschaos",
     "chaos.delete_networkchaos",
     "escalate.human_review",
@@ -17,6 +18,7 @@ VALID_OPERATION_FAMILIES: tuple[OperationFamily, ...] = (
     "rollout.undo_deployment",
     "rollout.restart_deployment",
     "scale.deployment",
+    "pod.delete_stateless_pod",
     "chaos.delete_stresschaos",
     "chaos.delete_networkchaos",
     "escalate.human_review",
@@ -128,9 +130,97 @@ class ReasonerOutput:
 
 
 @dataclass(slots=True)
+class CapabilityParameterSpec:
+    name: str
+    description: str
+    required: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str):
+            raise TypeError("name must be a str")
+        if not self.name:
+            raise ValueError("name must be non-empty")
+        if not isinstance(self.description, str):
+            raise TypeError("description must be a str")
+        if not self.description:
+            raise ValueError("description must be non-empty")
+        if not isinstance(self.required, bool):
+            raise TypeError("required must be a bool")
+
+
+@dataclass(slots=True)
+class VerificationRecipeSpec:
+    check_types: list[str] = field(default_factory=list)
+    success_criteria: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        _validate_string_list(self.check_types, field_name="check_types")
+        _validate_string_list(self.success_criteria, field_name="success_criteria")
+
+
+@dataclass(slots=True)
+class CapabilitySpec:
+    capability_family: OperationFamily
+    description: str
+    layer: str
+    blast_radius_prior: float
+    reversible: bool
+    required_parameters: list[CapabilityParameterSpec] = field(default_factory=list)
+    allowed_read_tools: list[str] = field(default_factory=list)
+    mutation_tool: str | None = None
+    verification_recipe: VerificationRecipeSpec = field(default_factory=VerificationRecipeSpec)
+    escalation_fallback: str = ""
+    supported_slices: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.capability_family not in VALID_OPERATION_FAMILIES:
+            raise ValueError(f"unsupported capability_family: {self.capability_family}")
+        if not isinstance(self.description, str):
+            raise TypeError("description must be a str")
+        if not self.description:
+            raise ValueError("description must be non-empty")
+        if not isinstance(self.layer, str):
+            raise TypeError("layer must be a str")
+        if not self.layer:
+            raise ValueError("layer must be non-empty")
+        if not _is_number(self.blast_radius_prior):
+            raise TypeError("blast_radius_prior must be a float-compatible number")
+        if self.blast_radius_prior < 0.0 or self.blast_radius_prior > 1.0:
+            raise ValueError("blast_radius_prior must be in the range [0.0, 1.0]")
+        if not isinstance(self.reversible, bool):
+            raise TypeError("reversible must be a bool")
+        if not isinstance(self.required_parameters, list):
+            raise TypeError("required_parameters must be a list[CapabilityParameterSpec]")
+        normalized_parameters: list[CapabilityParameterSpec] = []
+        for parameter in self.required_parameters:
+            if isinstance(parameter, dict):
+                parameter = capability_parameter_from_dict(parameter)
+            if not isinstance(parameter, CapabilityParameterSpec):
+                raise TypeError("required_parameters must contain only CapabilityParameterSpec values")
+            normalized_parameters.append(parameter)
+        self.required_parameters = normalized_parameters
+        _validate_string_list(self.allowed_read_tools, field_name="allowed_read_tools")
+        if self.mutation_tool is not None:
+            if not isinstance(self.mutation_tool, str):
+                raise TypeError("mutation_tool must be a str or None")
+            if not self.mutation_tool:
+                raise ValueError("mutation_tool must be non-empty when provided")
+        if isinstance(self.verification_recipe, dict):
+            self.verification_recipe = verification_recipe_from_dict(self.verification_recipe)
+        if not isinstance(self.verification_recipe, VerificationRecipeSpec):
+            raise TypeError("verification_recipe must be a VerificationRecipeSpec")
+        if not isinstance(self.escalation_fallback, str):
+            raise TypeError("escalation_fallback must be a str")
+        if not self.escalation_fallback:
+            raise ValueError("escalation_fallback must be non-empty")
+        _validate_string_list(self.supported_slices, field_name="supported_slices")
+        self.blast_radius_prior = float(self.blast_radius_prior)
+
+
+@dataclass(slots=True)
 class CapabilityCatalog:
     version: str
-    capabilities: list[dict[str, Any]] = field(default_factory=list)
+    capabilities: list[CapabilitySpec] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not isinstance(self.version, str):
@@ -138,10 +228,15 @@ class CapabilityCatalog:
         if not self.version:
             raise ValueError("version must be non-empty")
         if not isinstance(self.capabilities, list):
-            raise TypeError("capabilities must be a list[dict[str, Any]]")
+            raise TypeError("capabilities must be a list[CapabilitySpec]")
+        normalized_capabilities: list[CapabilitySpec] = []
         for capability in self.capabilities:
-            if not isinstance(capability, dict):
-                raise TypeError("capabilities must contain only dict values")
+            if isinstance(capability, dict):
+                capability = capability_spec_from_dict(capability)
+            if not isinstance(capability, CapabilitySpec):
+                raise TypeError("capabilities must contain only CapabilitySpec values")
+            normalized_capabilities.append(capability)
+        self.capabilities = normalized_capabilities
 
 
 def reasoner_output_from_dict(payload: dict[str, Any]) -> ReasonerOutput:
@@ -164,6 +259,18 @@ def reasoner_output_from_dict(payload: dict[str, Any]) -> ReasonerOutput:
         likely_causes=likely_causes,
         missing_information=missing_information,
         intents=intents,
+    )
+
+
+def capability_catalog_from_dict(payload: dict[str, Any]) -> CapabilityCatalog:
+    if not isinstance(payload, dict):
+        raise TypeError("CapabilityCatalog payload must be a dict")
+    capabilities_raw = payload.get("capabilities", [])
+    if not isinstance(capabilities_raw, list):
+        raise TypeError("CapabilityCatalog capabilities must be a list")
+    return CapabilityCatalog(
+        version=str(payload["version"]),
+        capabilities=[capability_spec_from_dict(item) for item in capabilities_raw],
     )
 
 
@@ -208,6 +315,61 @@ def _operation_intent_from_dict(payload: dict[str, Any]) -> OperationIntent:
         requires_approval=bool(payload["requires_approval"]),
         verification_hints=dict(payload.get("verification_hints", {})),
         rollback_hints=dict(payload.get("rollback_hints", {})),
+    )
+
+
+def capability_parameter_from_dict(payload: dict[str, Any]) -> CapabilityParameterSpec:
+    if not isinstance(payload, dict):
+        raise TypeError("CapabilityParameterSpec payload must be a dict")
+    return CapabilityParameterSpec(
+        name=str(payload["name"]),
+        description=str(payload["description"]),
+        required=bool(payload.get("required", True)),
+    )
+
+
+def verification_recipe_from_dict(payload: dict[str, Any]) -> VerificationRecipeSpec:
+    if not isinstance(payload, dict):
+        raise TypeError("VerificationRecipeSpec payload must be a dict")
+    return VerificationRecipeSpec(
+        check_types=_string_list(payload.get("check_types"), field_name="check_types"),
+        success_criteria=_string_list(
+            payload.get("success_criteria"),
+            field_name="success_criteria",
+        ),
+    )
+
+
+def capability_spec_from_dict(payload: dict[str, Any]) -> CapabilitySpec:
+    if not isinstance(payload, dict):
+        raise TypeError("CapabilitySpec payload must be a dict")
+    capability_family = payload.get("capability_family", payload.get("operation_family"))
+    if capability_family is None:
+        raise KeyError("CapabilitySpec payload must include capability_family")
+    required_parameters = payload.get("required_parameters", [])
+    if not isinstance(required_parameters, list):
+        raise TypeError("CapabilitySpec required_parameters must be a list")
+    verification_recipe = payload.get("verification_recipe", {})
+    if not isinstance(verification_recipe, dict):
+        raise TypeError("CapabilitySpec verification_recipe must be a dict")
+    return CapabilitySpec(
+        capability_family=capability_family,
+        description=str(payload.get("description") or capability_family),
+        layer=str(payload.get("layer") or "bounded"),
+        blast_radius_prior=float(payload.get("blast_radius_prior", 0.2)),
+        reversible=bool(payload.get("reversible", True)),
+        required_parameters=[capability_parameter_from_dict(item) for item in required_parameters],
+        allowed_read_tools=_string_list(
+            payload.get("allowed_read_tools"),
+            field_name="allowed_read_tools",
+        ),
+        mutation_tool=str(payload["mutation_tool"]) if payload.get("mutation_tool") is not None else None,
+        verification_recipe=verification_recipe_from_dict(verification_recipe),
+        escalation_fallback=str(payload.get("escalation_fallback") or "escalate.human_review"),
+        supported_slices=_string_list(
+            payload.get("supported_slices"),
+            field_name="supported_slices",
+        ),
     )
 
 

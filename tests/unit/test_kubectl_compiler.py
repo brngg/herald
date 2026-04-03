@@ -87,6 +87,38 @@ class KubectlCompilerTest(unittest.TestCase):
         self.assertEqual(preview["action_type"], "scale_deployment")
         self.assertEqual(preview["parameters"]["replicas"], 2)
 
+    def test_compiles_delete_pod_intent_to_exact_command(self) -> None:
+        plan = compile_execution_plan(
+            OperationIntent(
+                intent_id="intent-delete-pod",
+                intent="Delete the unhealthy cartservice Pod.",
+                operation_family="pod.delete_stateless_pod",
+                target=ResourceTarget(namespace="default", kind="Pod", name="cartservice-abcde"),
+                arguments={"deployment": "cartservice", "stateless_workload": True},
+                reversible=True,
+                confidence_score=0.6,
+                blast_radius_score=0.18,
+                requires_approval=True,
+                verification_hints={
+                    "post_check": "deployment_readiness_shortfall",
+                    "deployment": "cartservice",
+                    "min_ready_count": 1,
+                },
+                rollback_hints={},
+            )
+        )
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(
+            plan.steps[0].command,
+            ["kubectl", "delete", "pod", "cartservice-abcde", "-n", "default"],
+        )
+        preview = compile_v1_dispatch_preview(plan)
+        self.assertEqual(preview["action_type"], "delete_pod")
+        self.assertEqual(preview["parameters"]["pod"], "cartservice-abcde")
+        self.assertEqual(preview["parameters"]["deployment"], "cartservice")
+
 
 if __name__ == "__main__":
     unittest.main()

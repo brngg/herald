@@ -106,6 +106,30 @@ def _tools() -> dict[str, ExecutionTool]:
             },
             mutation=True,
         ),
+        "get_pod_context": ExecutionTool(
+            name="get_pod_context",
+            description="describe pod",
+            callable=lambda **_: {
+                "status": "succeeded",
+                "returncode": 0,
+                "stdout": '{"metadata":{"name":"cartservice-abcde"}}',
+                "stderr": "",
+                "command": ["kubectl", "get", "pod", "cartservice-abcde", "-o", "json"],
+            },
+            mutation=False,
+        ),
+        "delete_pod": ExecutionTool(
+            name="delete_pod",
+            description="delete pod",
+            callable=lambda **_: {
+                "status": "succeeded",
+                "returncode": 0,
+                "stdout": 'pod "cartservice-abcde" deleted\n',
+                "stderr": "",
+                "command": ["kubectl", "delete", "pod", "cartservice-abcde", "-n", "default"],
+            },
+            mutation=True,
+        ),
     }
 
 
@@ -284,6 +308,66 @@ class GeminiExecutionAgentTest(unittest.TestCase):
         self.assertEqual(
             observed_arguments,
             [{"namespace": "default", "deployment": "cartservice"}],
+        )
+
+    def test_agent_uses_approved_dispatch_parameters_for_delete_pod(self) -> None:
+        observed_arguments: list[dict[str, object]] = []
+
+        def delete_pod(**kwargs: object) -> dict[str, object]:
+            observed_arguments.append(dict(kwargs))
+            return {
+                "status": "succeeded",
+                "returncode": 0,
+                "stdout": 'pod "cartservice-abcde" deleted\n',
+                "stderr": "",
+                "command": ["kubectl", "delete", "pod", "cartservice-abcde", "-n", "default"],
+            }
+
+        tools = dict(_tools())
+        tools["delete_pod"] = ExecutionTool(
+            name="delete_pod",
+            description="delete pod",
+            callable=delete_pod,
+            mutation=True,
+        )
+        dispatch = ExecutionDispatch(
+            incident_id="incident-789",
+            action_id="delete-cartservice-pod",
+            action_type="delete_pod",
+            parameters={"namespace": "default", "pod": "cartservice-abcde", "deployment": "cartservice"},
+            worker_id="worker-789",
+            requested_at="2026-03-27T03:00:00+00:00",
+            allowed_tool_names=["get_pod_context", "delete_pod"],
+            max_steps=2,
+        )
+        agent = GeminiExecutionAgent(
+            llm=_FakeExecutionAgentLLM(
+                [
+                    ExecutionAgentDecision(
+                        decision_type="tool_call",
+                        tool_name="delete_pod",
+                        arguments={},
+                        status="failed",
+                        summary="Delete the approved stateless Pod.",
+                    ),
+                    ExecutionAgentDecision(
+                        decision_type="finish",
+                        tool_name="",
+                        arguments={},
+                        status="succeeded",
+                        summary="Deleted the unhealthy Pod successfully.",
+                    ),
+                ]
+            )
+        )
+
+        status, summary, *_ = agent.run(dispatch=dispatch, tools=tools)
+
+        self.assertEqual(status, "succeeded")
+        self.assertEqual(summary, "Deleted the unhealthy Pod successfully.")
+        self.assertEqual(
+            observed_arguments,
+            [{"namespace": "default", "pod": "cartservice-abcde", "deployment": "cartservice"}],
         )
 
     def test_agent_fails_when_model_does_not_finish_within_max_steps(self) -> None:

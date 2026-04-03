@@ -366,6 +366,43 @@ def _build_checks(
         )
         return checks
 
+    if action_type == "delete_pod":
+        deployment = target_name
+        if synthesized_plan is not None and getattr(synthesized_plan, "steps", None):
+            hinted_deployment = synthesized_plan.steps[0].verification_hints.get("deployment")
+            if isinstance(hinted_deployment, str) and hinted_deployment:
+                deployment = hinted_deployment
+        min_ready_count = 1
+        if synthesized_plan is not None and getattr(synthesized_plan, "steps", None):
+            hinted = synthesized_plan.steps[0].verification_hints.get("min_ready_count")
+            if isinstance(hinted, int) and not isinstance(hinted, bool):
+                min_ready_count = hinted
+        checks.append(
+            VerificationCheck(
+                check_id="kubernetes-pod-absent",
+                check_type="kubernetes_resource_absent",
+                summary="Verify the unhealthy Pod is absent after deletion.",
+                parameters={
+                    "namespace": namespace,
+                    "kind": "Pod",
+                    "name": target_name,
+                },
+            )
+        )
+        checks.append(
+            VerificationCheck(
+                check_id="prometheus-ready-count-at-least",
+                check_type="prometheus_ready_count_at_least",
+                summary="Verify the owning Deployment still has the bounded minimum of ready replicas.",
+                parameters={
+                    "namespace": namespace,
+                    "deployment": deployment,
+                    "min_ready_count": min_ready_count,
+                },
+            )
+        )
+        return checks
+
     if action_type == "delete_stresschaos":
         checks.append(
             VerificationCheck(
@@ -483,6 +520,16 @@ def _prometheus_post_check(
             deployment=deployment,
             min_ready_count=min_ready_count,
         )
+    if plan.action_type == "delete_pod":
+        deployment_name = str(check.parameters.get("deployment") or "")
+        min_ready_count = int(check.parameters.get("min_ready_count") or 1)
+        if not deployment_name:
+            return {}
+        return prometheus.post_check_deployment_readiness_target(
+            namespace=namespace,
+            deployment=deployment_name,
+            min_ready_count=min_ready_count,
+        )
     if plan.action_type == "delete_stresschaos":
         return prometheus.post_check_cpu_saturation(namespace=namespace, deployment=deployment)
     if plan.action_type == "delete_networkchaos":
@@ -556,6 +603,8 @@ def _observed_probe_success(result: dict[str, Any]) -> float | None:
 def _action_target_name(action: RemediationAction) -> str | None:
     if action.action_type in {"rollout_undo_deployment", "rollout_restart_deployment", "scale_deployment"}:
         return str(action.parameters.get("deployment") or "")
+    if action.action_type == "delete_pod":
+        return str(action.parameters.get("pod") or "")
     if action.action_type in {"delete_stresschaos", "delete_networkchaos"}:
         return str(action.parameters.get("name") or "")
     return None
@@ -568,6 +617,8 @@ def _operation_family_for_action(action_type: str) -> str:
         return "rollout.restart_deployment"
     if action_type == "scale_deployment":
         return "scale.deployment"
+    if action_type == "delete_pod":
+        return "pod.delete_stateless_pod"
     if action_type == "delete_stresschaos":
         return "chaos.delete_stresschaos"
     if action_type == "delete_networkchaos":
@@ -581,6 +632,12 @@ def _verification_target(action: RemediationAction) -> ResourceTarget:
             namespace=str(action.parameters["namespace"]),
             kind="Deployment",
             name=str(action.parameters["deployment"]),
+        )
+    if action.action_type == "delete_pod":
+        return ResourceTarget(
+            namespace=str(action.parameters["namespace"]),
+            kind="Pod",
+            name=str(action.parameters["pod"]),
         )
     if action.action_type == "delete_stresschaos":
         return ResourceTarget(

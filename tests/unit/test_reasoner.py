@@ -120,6 +120,47 @@ class ReasonerTest(unittest.TestCase):
         self.assertTrue(state["mapped_v1_candidates"])
         self.assertEqual(state["mapped_v1_candidates"][0].action_type, "scale_deployment")
 
+    def test_heuristic_reasoner_uses_delete_pod_for_isolated_unhealthy_replica(self) -> None:
+        observations = ObservationBundle(
+            incident_id="pod-replacement-123",
+            incident_class_hint="unknown",
+            namespace_hint="default",
+            source="prometheus",
+            alert_context={
+                "labels": {"severity": "warning", "alertname": "HeraldPodUnhealthy"},
+                "annotations": {"summary": "one cartservice pod is unhealthy"},
+                "deployment_hint": "cartservice",
+                "pod": "cartservice-abcde",
+            },
+            kubernetes={
+                "deployment_summary": {
+                    "name": "cartservice",
+                    "desired_replicas": 2,
+                    "ready_replicas": 1,
+                    "available_replicas": 1,
+                },
+                "pod_status_summary": {
+                    "non_ready_pods": ["cartservice-abcde"],
+                    "ready_pod_count": 1,
+                    "restart_count_total": 4,
+                },
+            },
+            prometheus={
+                "ready": {"status": "succeeded", "value": 1.0},
+                "incident_signal": {"status": "succeeded", "value": 1.0},
+            },
+            collected_at="2026-03-29T20:00:00+00:00",
+        )
+
+        state = run_reasoner_pipeline(_incident("unknown"), observations)
+
+        self.assertEqual(state["status"], "succeeded")
+        assert state["reasoner_output"] is not None
+        self.assertEqual(state["reasoner_output"].intents[0].operation_family, "pod.delete_stateless_pod")
+        self.assertEqual(state["reasoner_output"].intents[0].target.kind, "Pod")
+        self.assertTrue(state["mapped_v1_candidates"])
+        self.assertEqual(state["mapped_v1_candidates"][0].action_type, "delete_pod")
+
 
 if __name__ == "__main__":
     unittest.main()

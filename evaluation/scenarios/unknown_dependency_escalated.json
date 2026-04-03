@@ -1,0 +1,42 @@
+{
+  "scenario_id": "unknown_dependency_escalated",
+  "payload_file": "payloads/unknown_dependency_alert.json",
+  "approve_action_id": "reasoner-escalate-unknown-dependency-456",
+  "prometheus": {
+    "ready_values": [1.0],
+    "pre_check_retry_attempts": 1,
+    "post_check_retry_attempts": 1
+  },
+  "kubernetes": {
+    "pods": {
+      "returncode": 0,
+      "stdout": "{\"items\":[]}",
+      "stderr": ""
+    },
+    "deployment": {
+      "returncode": 0,
+      "stdout": "{\"metadata\":{\"name\":\"frontend\",\"generation\":7},\"spec\":{\"replicas\":1,\"template\":{\"spec\":{\"containers\":[{\"image\":\"example.com/frontend:v1\"}]}}},\"status\":{\"updatedReplicas\":1,\"readyReplicas\":1,\"availableReplicas\":1,\"observedGeneration\":7}}",
+      "stderr": ""
+    },
+    "service": {
+      "returncode": 0,
+      "stdout": "{\"metadata\":{\"name\":\"frontend\"},\"spec\":{\"selector\":{\"app\":\"frontend\"},\"ports\":[{\"port\":80}]}}",
+      "stderr": ""
+    },
+    "service_endpoints": {
+      "returncode": 0,
+      "stdout": "{\"subsets\":[{\"addresses\":[{\"ip\":\"10.0.0.10\"}]}]}",
+      "stderr": ""
+    },
+    "endpoint_slices": {
+      "returncode": 0,
+      "stdout": "{\"items\":[{\"endpoints\":[{\"conditions\":{\"ready\":true}}]}]}",
+      "stderr": ""
+    }
+  },
+  "expected": {
+    "top_action_id": "reasoner-escalate-unknown-dependency-456",
+    "requires_approval": true,
+    "final_state": "escalated"
+  }
+}

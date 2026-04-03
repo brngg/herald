@@ -102,6 +102,23 @@ class ExecutionSchemaTest(unittest.TestCase):
 
         self.assertEqual(dispatch.action_type, "scale_deployment")
 
+    def test_accepts_delete_pod_dispatch(self) -> None:
+        dispatch = ExecutionDispatch(
+            incident_id="incident-123",
+            action_id="delete-cartservice-pod",
+            action_type="delete_pod",
+            parameters={"namespace": "default", "pod": "cartservice-abcde", "deployment": "cartservice"},
+            worker_id="worker-123",
+            requested_at="2026-03-27T03:00:00+00:00",
+            allowed_tool_names=[
+                "get_pod_context",
+                "delete_pod",
+            ],
+            max_steps=5,
+        )
+
+        self.assertEqual(dispatch.action_type, "delete_pod")
+
     def test_accepts_valid_execution_result(self) -> None:
         result = ExecutionResult(
             worker_id="worker-123",

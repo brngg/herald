@@ -204,6 +204,18 @@ def heuristic_reason_node(state: ReasonerAgentState) -> dict[str, Any]:
         diagnosis_summary = "Cartservice dependency traffic appears near zero and is consistent with an active network partition."
         likely_causes = ["A Chaos Mesh NetworkChaos rule is partitioning frontend from cartservice."]
     else:
+        dynamic_pod_output = _dynamic_pod_replacement_reasoning(
+            observations=observations,
+            incident=incident,
+            namespace=namespace,
+            deployment_hint=deployment_hint or service_hint,
+        )
+        if dynamic_pod_output is not None:
+            return {
+                "reasoner_output": dynamic_pod_output,
+                "mapped_v1_candidates": _mapped_v1_candidates(dynamic_pod_output.intents),
+                "status": "succeeded",
+            }
         dynamic_scale_output = _dynamic_scale_reasoning(
             observations=observations,
             incident=incident,
@@ -413,6 +425,82 @@ def _dynamic_scale_reasoning(
                 arguments={"reason": "Bounded scaling may restore safe availability, but the root cause of the replica shortfall is still unknown."},
                 reversible=True,
                 confidence_score=0.3,
+                blast_radius_score=0.0,
+                requires_approval=True,
+                verification_hints={},
+                rollback_hints={},
+            ),
+        ],
+    )
+
+
+def _dynamic_pod_replacement_reasoning(
+    *,
+    observations: ObservationBundle,
+    incident: Incident,
+    namespace: str,
+    deployment_hint: str | None,
+) -> ReasonerOutput | None:
+    pod_summary = observations.kubernetes.get("pod_status_summary")
+    deployment_summary = observations.kubernetes.get("deployment_summary")
+    if not isinstance(pod_summary, dict) or not isinstance(deployment_summary, dict):
+        return None
+
+    deployment_name = deployment_hint or _string_or_none(deployment_summary.get("name"))
+    if deployment_name is None:
+        return None
+
+    desired_replicas = _non_negative_int(deployment_summary.get("desired_replicas"))
+    ready_replicas = _non_negative_int(deployment_summary.get("ready_replicas"))
+    available_replicas = _non_negative_int(deployment_summary.get("available_replicas"))
+    non_ready_pods = pod_summary.get("non_ready_pods")
+    if not isinstance(non_ready_pods, list) or not non_ready_pods:
+        return None
+    pod_name = _string_or_none(non_ready_pods[0])
+    if pod_name is None:
+        return None
+
+    if desired_replicas <= 1 or available_replicas <= 0:
+        return None
+
+    return ReasonerOutput(
+        diagnosis_summary=(
+            f"Deployment {deployment_name} appears mostly healthy, but Pod {pod_name} is isolated and unhealthy."
+        ),
+        likely_causes=[
+            f"Deployment {deployment_name} still has {available_replicas} available replica(s) while Pod {pod_name} remains non-ready.",
+        ],
+        missing_information=[],
+        intents=[
+            OperationIntent(
+                intent_id=f"reasoner-delete-pod-{pod_name}",
+                intent=f"Delete unhealthy Pod {pod_name} so Deployment {deployment_name} can recreate it.",
+                operation_family="pod.delete_stateless_pod",
+                target=ResourceTarget(namespace=namespace, kind="Pod", name=pod_name),
+                arguments={
+                    "deployment": deployment_name,
+                    "stateless_workload": True,
+                },
+                reversible=True,
+                confidence_score=0.72,
+                blast_radius_score=0.15,
+                requires_approval=True,
+                verification_hints={
+                    "pre_check": "deployment_readiness_shortfall",
+                    "post_check": "deployment_readiness_shortfall",
+                    "deployment": deployment_name,
+                    "min_ready_count": max(1, available_replicas),
+                },
+                rollback_hints={"fallback": "rollout.restart_deployment"},
+            ),
+            OperationIntent(
+                intent_id=f"reasoner-escalate-{pod_name}",
+                intent=f"Escalate unhealthy Pod {pod_name} for human review.",
+                operation_family="escalate.human_review",
+                target=ResourceTarget(namespace=namespace, kind="Incident", name=incident.incident_id),
+                arguments={"reason": "The isolated pod fault may require deeper application or infrastructure investigation."},
+                reversible=True,
+                confidence_score=0.25,
                 blast_radius_score=0.0,
                 requires_approval=True,
                 verification_hints={},

@@ -27,21 +27,34 @@ No autonomous execution. No black boxes. No unverified fixes.
 
 ---
 
-## What HERALD Does
+## What HERALD Is Today
 
-HERALD is built around three principles:
+HERALD today is a capability-driven Verified Recovery orchestrator for Kubernetes incidents.
+
+The default runtime path is `v2_execute`, which means the normal flow is:
+
+- observe live Kubernetes and Prometheus state
+- reason over bounded capability families
+- critique those candidate plans against safety policy
+- synthesize exact `ExecutionPlan` candidates
+- require human approval through the HITL Gate
+- execute only bounded approved tools
+- verify whether recovery actually happened
+- record the full lifecycle in the `DecisionTrace`
+
+Three principles still anchor the system:
 
 - **Human authority**: a human operator approves before anything executes
 - **Auditability**: every plan, verdict, approval, and outcome is recorded
-- **Verified recovery**: every remediation should follow pre-check, execute, and post-check
+- **Verified recovery**: every remediation follows pre-check, execute, and post-check
 
-The current control plane now has two human gates:
+The current control plane has two human gates:
 
 - **Gate 0 investigation approval**: Alertmanager intake stores pending alerts in a
   filesystem inbox under `artifacts/inbox/`, and an operator explicitly chooses whether
   HERALD should investigate or ignore each alert.
-- **Execution approval**: after Gate 0 investigation starts, HERALD still runs Fixer ->
-  Judge -> HITL Gate and requires a second explicit human approval before any action executes.
+- **Execution approval**: after Gate 0 investigation starts, HERALD still requires a
+  second explicit human approval before any mutation executes.
 
 ---
 
@@ -65,67 +78,56 @@ That is why the project emphasizes the full chain:
 
 ### How HERALD Works Today
 
-The current implementation is intentionally bounded. For the live crashloop slice, the
-system already knows the supported incident class and operates over a small set of
-reversible remediation actions such as rollout undo and rollout restart.
+The system is no longer just a classifier plus a fixed action lookup table, but it is
+also not unconstrained autonomy.
 
-This can feel controlled because, today, the workflow is still operating inside a known
-corridor:
+Today HERALD reasons over a bounded capability catalog and executes only approved,
+typed tool families. The current catalog includes:
 
-- HERALD parses a supported alert
-- Fixer ranks bounded remediation actions
-- Judge evaluates the proposed plan against the safety rubric
-- the HITL Gate surfaces the recommended action
-- after approval, HERALD executes the bounded action
-- HERALD runs pre-check and post-check verification
-- the `DecisionTrace` records both the rolled-up state and node-run provenance
+- `rollout.undo_deployment`
+- `rollout.restart_deployment`
+- `scale.deployment`
+- `pod.delete_stateless_pod`
+- `chaos.delete_stresschaos`
+- `chaos.delete_networkchaos`
+- `escalate.human_review`
 
-The system works this way right now for a reason:
+Each capability has:
 
-- it keeps execution safe and reversible during the demo phase
-- it makes evaluation and replay honest and repeatable
-- it proves the control-plane architecture before expanding the action surface
-- it avoids pretending HERALD can already fix arbitrary incidents safely
+- a bounded execution family
+- a blast-radius prior
+- a verification recipe
+- an escalation fallback
 
-In other words, the current demo is not trying to show unlimited autonomy. It is trying
-to prove that approval-gated Verified Recovery works end to end.
+That means the dynamic part of HERALD is:
 
-Parallel HERALD 2.0 work is now underway behind a shadow path.
-When `engine_mode=v2_shadow`, HERALD collects live Kubernetes and Prometheus context,
-runs `observe -> reason -> critique -> synthesize` before bounded v1 planning, and
-then records shadow `verify -> replan` follow-up analysis after the real v1 execution
-path finishes. Execution behavior stays unchanged while the new substrate is validated.
+- it derives the right capability from live evidence
+- it synthesizes the exact plan to execute
+- it verifies the outcome before calling recovery complete
 
-`engine_mode=v2_execute` is now the default for the CLI, terminal inbox, and replay
-runner. In that mode, the supported benchmark slices execute from exact
-Synthesizer-produced `ExecutionPlan` candidates instead of the old hardcoded
-v1 executor mapping, while `engine_mode=v1` remains available as a compatibility path.
+What HERALD does **not** do today:
 
-### Future Direction: Derived Mutation Plans
+- run arbitrary shell commands as a normal control surface
+- invent unrestricted kubectl mutations
+- patch arbitrary cluster objects without a bounded capability contract
+- merge or deploy code fixes automatically
 
-The longer-term idea is not to hand-author an enormous toolbox of incident-specific
-commands forever. The intended evolution is for HERALD to become more dynamic by using
-Fixer and Judge output to derive the executable mutation plan itself.
+`engine_mode=v2_execute` is the default for the CLI, terminal inbox, and replay runner.
+`engine_mode=v2_shadow` still exists as a diagnostic mode. Explicit legacy behavior is
+now compatibility-only and no longer the normal runtime story.
 
-The future shape looks more like this:
+### What Remains Transitional
 
-- Fixer produces a structured remediation plan, not just a pre-named action choice
-- Judge evaluates that plan for safety, blast radius, and plausibility
-- HERALD translates the approved plan into an exact executable mutation plan
-- the operator approves that exact plan through the HITL Gate
-- HERALD executes it and verifies recovery
+The repo still contains some compatibility scaffolding from the older architecture:
 
-That direction keeps the current philosophy intact:
+- `schemas/remediation.py`
+- `agents/fixer.py`
+- `agents/judge.py`
+- a few legacy upgrade helpers that map older action-shaped artifacts into the
+  current candidate-first runtime contract
 
-- HERALD should try to find a fix, not only recommend escalation
-- a human still approves before execution
-- recovery is only considered successful after verification
-- the `DecisionTrace` still captures plan, verdict, approval, execution, and outcome
-
-This is the bridge from the current bounded-tool demo to a more flexible system. The
-demo phase uses a narrow execution corridor on purpose. Future HERALD should keep the
-same control-plane safeguards while becoming more adaptive in how it generates the
-mutation plan it asks the operator to approve.
+Those pieces are no longer the normal operating path, but they still exist so older
+artifacts and test fixtures can be read during the migration window.
 
 ---
 
@@ -137,7 +139,8 @@ mutation plan it asks the operator to approve.
 | Chaos injection | Chaos Mesh |
 | Metrics and alerting | Prometheus, Grafana, Alertmanager |
 | Agent orchestration | LangGraph |
-| Workflow execution | Temporal |
+| Workflow execution today | Python workflow runner + typed execution worker |
+| Durable orchestration target | Temporal |
 | LLM evaluation and tracing | Langfuse |
 | Human approval | Slack API |
 | Infrastructure | Kubernetes on minikube |
@@ -179,11 +182,26 @@ The long-term model is: broad read access through typed observation tools, narro
 mutation access through bounded execution tools, and exact-plan approval before any
 write action executes.
 
+HERALD's current dynamic recovery catalog is capability-driven rather than
+incident-branch-driven. The default catalog includes:
+
+- `rollout.undo_deployment`
+- `rollout.restart_deployment`
+- `scale.deployment`
+- `pod.delete_stateless_pod`
+- `chaos.delete_stresschaos`
+- `chaos.delete_networkchaos`
+- `escalate.human_review`
+
+Each capability carries a bounded execution family, a blast-radius prior, and an
+explicit verification recipe. New mutation families should follow that same rule:
+no write capability lands without typed verification and escalation behavior.
+
 ---
 
-## Incident Scenarios
+## Benchmark Scenarios
 
-HERALD is currently scoped to four incident classes:
+HERALD still uses four checked-in benchmark scenarios as primary evaluation anchors:
 
 | Scenario | Failure Type |
 |---|---|
@@ -199,46 +217,55 @@ Checked-in chaos and alerting coverage currently includes:
 - `frontend-bad-cart-config.yaml`
 - `chaos-cartservice-network-partition.yaml`
 
-The crashloop and bad-config slices have been live-validated end to end in the local
-cluster. The CPU slice has also been live exercised through the new Gate 0/Gate 1
-watcher flow, but its sustained-high-load execution path is still timing-sensitive.
-The network-partition slice is now implemented in the bounded v1 path and replay-tested.
-It has also been exercised through a live operator run far enough to prove the approval
-and safe-skip path, but the bounded `NetworkChaos` deletion has not yet been
-live-validated end to end.
+These slices are benchmarks, not the full architecture boundary anymore. HERALD now
+also has capability-driven paths for readiness shortfall, stateless pod replacement,
+and safe escalation validation.
+
+Live validation status today:
+
+- crashloop rollback: live-validated end to end on `v2_execute`
+- bad config rollback: live-validated end to end
+- scale shortfall: live-validated end to end on `v2_execute`
+- CPU chaos deletion: live-exercised, but sustained high-load timing remains more sensitive
+- network-partition deletion: replay-validated and safe-skip path proven live, but not yet fully live-validated end to end
+- stateless pod replacement: replay-validated, live helper exists, but the live setup is still precondition-sensitive
+- escalation-only path: replay-validated; live proof still needs a cleaner neutral scenario than the current placeholder
 
 ---
 
 ## Project Status
 
-Current implementation is strongest in:
+HERALD today is best understood as a late-stage capability-driven recovery system.
 
-- local environment setup
-- chaos and alert generation/routing
-- Alertmanager-to-`Incident` ingestion
-- Fixer schema contracts and local CLI testing
-- live Gemini-backed Fixer plan generation for the `crashloop` slice
-- Judge contract, safety checks, and Gemini comparison path for the `crashloop` slice
-- HITL Gate routing and `DecisionTrace` assembly for the `crashloop` slice
-- a spawned Gemini-backed execution agent for the `crashloop` slice
-- bounded crashloop execution through typed Kubernetes tools inside the execution agent
-- pre-check and post-check verification for the `crashloop` slice, including Kubernetes-aware fallback when Prometheus readiness lags after rollout
-- a live-validated crashloop recovery workflow entrypoint
-- a full CPU saturation recovery slice for `frontend`, including Chaos Mesh deletion, approval-gated execution, and verification
-- a live-validated frontend bad-config recovery slice for `frontend`, including the `/cart` probe alert, approval-gated rollout rollback, and verified recovery
-- a bounded network-partition recovery slice for `frontend -> cartservice`, including approval-gated NetworkChaos deletion and verification
-- a partially live-exercised network-partition operator path that safely skipped execution when the incident signal had already cleared
-- a HERALD 2.0 shadow path behind `engine_mode=v2_shadow`, including typed observation bundles, a read-only cluster observer, a shadow Reasoner with typed intents, a policy Critic, a bounded Synthesizer/compiler, post-execution shadow verification, and bounded shadow replanning
-- the default `v2_execute` path for the bounded chaos-delete families plus the rollback paths, where the approved CPU-saturation, network-partition, bad-config, and crashloop rollback actions now dispatch from the Synthesizer plan instead of the old hardcoded execution mapping
-- a live-validated post-refactor crashloop recovery run on the default `v2_execute` path, including exact-plan approval and `v2_execution_plan` dispatch
-- replay artifacts and metrics for crashloop, CPU saturation, bad-config, and network-partition scenarios
+Strong and already real:
 
-Still not implemented end to end:
+- candidate-first approval via exact `ExecutionPlan` artifacts
+- default `v2_execute` runtime on the CLI, inbox, and replay runner
+- typed observation bundles from Kubernetes and Prometheus
+- capability-driven reasoning and synthesis
+- bounded Gemini-backed execution worker with typed tools
+- pre-check, execute, and post-check verification on the normal runtime path
+- replay metrics for both benchmark scenarios and newer dynamic capability scenarios
 
-- durable workflow orchestration
-- Slack-based approval flow
-- full retirement of the remaining v1 compatibility scaffolding and action-shaped artifact readers
-- a provider-backed replanning layer and true bounded multi-attempt `verify -> replan` loop on the v2 path
+Live-proven on the current architecture:
+
+- crashloop rollback recovery
+- frontend bad-config rollback recovery
+- scale shortfall recovery
+
+Implemented and replay-proven, but not all live-proven yet:
+
+- CPU chaos deletion
+- network-partition chaos deletion
+- stateless pod replacement
+- safe escalation on non-actionable evidence
+
+Still planned or incomplete:
+
+- durable Temporal orchestration
+- Slack-based HITL approval
+- final deletion of all remaining compatibility-only v1 scaffolding
+- a richer provider-backed bounded `verify -> replan` loop
 
 Progress by phase:
 
@@ -506,6 +533,63 @@ That helper:
 The bounded remediation for this slice is intentionally honest: HERALD removes the
 active CPU chaos object and then verifies that CPU pressure and readiness recover.
 
+### Dynamic Capability Validation
+
+HERALD now also has concrete validation assets for the newer capability-driven paths:
+
+- `scale.deployment`
+- `pod.delete_stateless_pod`
+- `escalate.human_review`
+
+#### Live Scale Shortfall Demo
+
+This helper creates a safe readiness shortfall by scaling `frontend` to `0`, then lets
+HERALD recommend the bounded scale-up plan and resume from the saved first-pass artifact.
+
+```bash
+./scripts/run_scale_shortfall_demo.sh
+```
+
+That helper:
+
+- scales `frontend` to `0`
+- waits for ready replicas to reach zero
+- runs the first HERALD pass with `payloads/readiness_shortfall_alert.json`
+- saves `artifacts/readiness_shortfall/<timestamp>/first-pass.json`
+- optionally resumes approval from the saved artifact
+- if approved, verifies that readiness recovers after the bounded scale action
+
+#### Live Stateless Pod Replacement Helper
+
+The stateless pod-replacement capability is implemented and replay-tested, but its live
+validation is still more precondition-sensitive than the benchmark demos. The helper
+below expects a workload that already has:
+
+- more than one desired replica
+- at least one non-ready pod for `app=<deployment>`
+
+It will validate that HERALD chooses the `pod.delete_stateless_pod` family when those
+preconditions already exist.
+
+```bash
+./scripts/run_stateless_pod_replacement_demo.sh --deployment cartservice
+```
+
+If the cluster is not already in that state, the helper exits with guidance instead of
+forcing a misleading scenario setup.
+
+#### Escalation Validation Helper
+
+This helper validates the bounded “diagnose and escalate” path when no safe mutation
+family is justified by the current evidence:
+
+```bash
+./scripts/run_unknown_dependency_escalation_demo.sh
+```
+
+It uses `payloads/unknown_dependency_alert.json` and resumes from the saved first-pass
+artifact just like the recovery demos.
+
 ### Live Execution View
 
 When you run the approval command, HERALD now streams the spawned execution worker lifecycle
@@ -561,7 +645,7 @@ pending `DecisionTrace`, but does not execute anything:
   --prometheus-base-url http://localhost:9090
 ```
 
-To exercise the HERALD 2.0 shadow path without changing execution behavior, add
+To exercise the shadow path without changing execution behavior, add
 `--engine-mode v2_shadow` to the same command. The workflow will record
 `observe`, `reason`, `critique`, and `synthesize` nodes, include
 `observation_bundle`, `reasoner_state`, `critic_state`, and `synthesizer_state`
@@ -745,6 +829,9 @@ Run one success path plus one failure path:
   --scenario evaluation/scenarios/crashloop_recovered.json \
   --scenario evaluation/scenarios/crashloop_worker_failure.json \
   --scenario evaluation/scenarios/frontend_cpu_recovered.json \
+  --scenario evaluation/scenarios/readiness_shortfall_recovered.json \
+  --scenario evaluation/scenarios/pod_unhealthy_recovered.json \
+  --scenario evaluation/scenarios/unknown_dependency_escalated.json \
   --runs 1 \
   --output-dir /tmp/herald-eval
 ```

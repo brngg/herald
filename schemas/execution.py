@@ -8,18 +8,21 @@ ExecutionActionType = Literal[
     "rollout_undo_deployment",
     "rollout_restart_deployment",
     "scale_deployment",
+    "delete_pod",
     "delete_stresschaos",
     "delete_networkchaos",
 ]
 ExecutionStatus = Literal["succeeded", "failed"]
 ExecutionToolName = Literal[
     "get_deployment_context",
+    "get_pod_context",
     "get_rollout_status",
     "get_stresschaos",
     "get_networkchaos",
     "rollout_undo_deployment",
     "rollout_restart_deployment",
     "scale_deployment",
+    "delete_pod",
     "delete_stresschaos",
     "delete_networkchaos",
 ]
@@ -28,18 +31,21 @@ VALID_EXECUTION_ACTION_TYPES: tuple[ExecutionActionType, ...] = (
     "rollout_undo_deployment",
     "rollout_restart_deployment",
     "scale_deployment",
+    "delete_pod",
     "delete_stresschaos",
     "delete_networkchaos",
 )
 VALID_EXECUTION_STATUSES: tuple[ExecutionStatus, ...] = ("succeeded", "failed")
 VALID_EXECUTION_TOOL_NAMES: tuple[ExecutionToolName, ...] = (
     "get_deployment_context",
+    "get_pod_context",
     "get_rollout_status",
     "get_stresschaos",
     "get_networkchaos",
     "rollout_undo_deployment",
     "rollout_restart_deployment",
     "scale_deployment",
+    "delete_pod",
     "delete_stresschaos",
     "delete_networkchaos",
 )
@@ -167,6 +173,18 @@ def _require_rollout_parameters(
             raise ValueError(f"{action_type} parameters must include replicas > 0")
         return
 
+    if action_type == "delete_pod":
+        for key in ("namespace", "pod"):
+            value = parameters.get(key)
+            if not isinstance(value, str):
+                raise TypeError(f"{action_type} parameters must include string {key!r}")
+            if not value:
+                raise ValueError(f"{action_type} parameters must include non-empty {key!r}")
+        deployment = parameters.get("deployment")
+        if deployment is not None and (not isinstance(deployment, str) or not deployment):
+            raise TypeError(f"{action_type} optional 'deployment' must be a non-empty string when provided")
+        return
+
     if action_type in {"delete_stresschaos", "delete_networkchaos"}:
         for key in ("namespace", "name"):
             value = parameters.get(key)
@@ -212,6 +230,8 @@ def _require_allowed_tool_names(
 
 
 def _allowed_tools_for_action(action_type: ExecutionActionType) -> set[str]:
+    if action_type == "delete_pod":
+        return {"get_pod_context", "delete_pod"}
     if action_type == "delete_stresschaos":
         return {"get_stresschaos", "delete_stresschaos"}
     if action_type == "delete_networkchaos":

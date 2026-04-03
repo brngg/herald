@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
 from typing import Any
+from typing import TYPE_CHECKING
 
 from schemas.approval import ApprovalCandidate, approval_candidate_from_dict
 from schemas.execution_plan import ExecutionPlan, ExecutionPlanStep
 from schemas.intents import ResourceTarget
 from schemas.remediation import RemediationAction
 from services.recovery.kubectl_compiler import compile_v1_dispatch_preview
-from workflows.hitl_gate import HITLDecision
+
+if TYPE_CHECKING:
+    from workflows.hitl_gate import HITLDecision
 
 
 def approval_candidate_from_saved(value: Any) -> ApprovalCandidate | None:
@@ -64,6 +67,12 @@ def action_target_label(action: RemediationAction) -> str:
         return f"StressChaos {str(action.parameters['name'])!r}"
     if action.action_type == "delete_networkchaos":
         return f"NetworkChaos {str(action.parameters['name'])!r}"
+    if action.action_type == "delete_pod":
+        pod_name = str(action.parameters["pod"])
+        deployment = str(action.parameters.get("deployment") or "")
+        if deployment:
+            return f"pod {pod_name!r} from deployment {deployment!r}"
+        return f"pod {pod_name!r}"
     if action.action_type == "scale_deployment":
         return (
             f"deployment {deployment_for_action(action)!r} "
@@ -90,6 +99,16 @@ def dispatch_parameters_match_action(
             "namespace": str(action.parameters["namespace"]),
             "name": str(action.parameters["name"]),
         }
+        return dispatch_parameters == expected
+
+    if action.action_type == "delete_pod":
+        expected = {
+            "namespace": str(action.parameters["namespace"]),
+            "pod": str(action.parameters["pod"]),
+        }
+        deployment = action.parameters.get("deployment")
+        if isinstance(deployment, str) and deployment:
+            expected["deployment"] = deployment
         return dispatch_parameters == expected
 
     expected = {
@@ -120,6 +139,7 @@ def legacy_action_hint_for_plan(
             "rollout_undo_deployment",
             "rollout_restart_deployment",
             "scale_deployment",
+            "delete_pod",
             "delete_stresschaos",
             "delete_networkchaos",
         ):
@@ -145,7 +165,7 @@ def legacy_action_hint_for_plan(
     }
 
 
-def select_candidate(hitl_decision: HITLDecision, candidate_id: str) -> ApprovalCandidate:
+def select_candidate(hitl_decision: "HITLDecision", candidate_id: str) -> ApprovalCandidate:
     for candidate in hitl_decision.candidate_options:
         if candidate.candidate_id == candidate_id:
             return candidate
@@ -273,6 +293,34 @@ def execution_plan_from_legacy_action(action: RemediationAction) -> ExecutionPla
             requires_approval=action.requires_approval,
             rollback_outline={"previous_replicas_unknown": True},
         )
+    if action.action_type == "delete_pod":
+        pod_name = str(action.parameters["pod"])
+        deployment = str(action.parameters.get("deployment") or pod_name)
+        return ExecutionPlan(
+            intent_id=action.action_id,
+            operation_family="pod.delete_stateless_pod",
+            target=ResourceTarget(namespace=namespace, kind="Pod", name=pod_name),
+            summary=action.description,
+            steps=[
+                ExecutionPlanStep(
+                    step_id=f"{action.action_id}:step-1",
+                    tool_name="delete_pod",
+                    command=["kubectl", "delete", "pod", pod_name, "-n", namespace],
+                    expected_effect="Delete the approved stateless Pod so the Deployment can recreate it.",
+                    reversible=True,
+                    verification_hints={
+                        "pre_check": "deployment_readiness_shortfall",
+                        "post_check": "deployment_readiness_shortfall",
+                        "deployment": deployment,
+                        "min_ready_count": 1,
+                    },
+                )
+            ],
+            allowed_tool_names=["get_pod_context", "delete_pod"],
+            blast_radius_score=action.blast_radius_score,
+            requires_approval=action.requires_approval,
+            rollback_outline={"escalation_if_unrecovered": True},
+        )
     if action.action_type == "escalate":
         return ExecutionPlan(
             intent_id=action.action_id,
@@ -350,6 +398,10 @@ def candidate_deployment(candidate: ApprovalCandidate) -> str:
         return "frontend"
     if candidate.execution_plan.operation_family == "chaos.delete_networkchaos":
         return "cartservice"
+    if candidate.execution_plan.operation_family == "pod.delete_stateless_pod" and candidate.execution_plan.steps:
+        deployment = candidate.execution_plan.steps[0].verification_hints.get("deployment")
+        if isinstance(deployment, str) and deployment:
+            return deployment
     return str(candidate.execution_plan.target.name or "unknown")
 
 

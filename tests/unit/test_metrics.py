@@ -17,9 +17,9 @@ class MetricsTest(unittest.TestCase):
                 "result": {
                     "hitl_decision": {
                         "requires_approval": True,
-                        "candidate_actions": [
-                            {"action_id": "rollout_undo_cartservice"},
-                            {"action_id": "restart_cartservice"},
+                        "candidate_options": [
+                            {"candidate_id": "rollout_undo_cartservice"},
+                            {"candidate_id": "restart_cartservice"},
                         ],
                     },
                     "decision_trace": {
@@ -45,9 +45,9 @@ class MetricsTest(unittest.TestCase):
                 "result": {
                     "hitl_decision": {
                         "requires_approval": True,
-                        "candidate_actions": [
-                            {"action_id": "restart_cartservice"},
-                            {"action_id": "rollout_undo_cartservice"},
+                        "candidate_options": [
+                            {"candidate_id": "restart_cartservice"},
+                            {"candidate_id": "rollout_undo_cartservice"},
                         ],
                     },
                     "decision_trace": {
@@ -78,7 +78,7 @@ class MetricsTest(unittest.TestCase):
         self.assertEqual(metrics["decision_trace_coverage_rate"], 1.0)
         self.assertEqual(metrics["median_recovery_latency_seconds"], 4.0)
 
-    def test_compute_metrics_reads_v2_candidate_options_via_legacy_action_hints(self) -> None:
+    def test_compute_metrics_prefers_v2_candidate_ids_over_legacy_action_hints(self) -> None:
         run_artifacts = [
             {
                 "expected": {

@@ -39,6 +39,9 @@ def _approved_action(action_type: str, *, namespace: str = "default", name: str 
     elif action_type == "scale_deployment":
         parameters["deployment"] = name
         parameters["replicas"] = 2
+    elif action_type == "delete_pod":
+        parameters["pod"] = name
+        parameters["deployment"] = "cartservice"
     elif action_type in {"delete_stresschaos", "delete_networkchaos"}:
         parameters["name"] = name
     elif action_type == "escalate":
@@ -61,6 +64,9 @@ def _synthesis_output(action_type: str, *, namespace: str = "default", name: str
         operation_family = "rollout.restart_deployment"
     elif action_type == "scale_deployment":
         operation_family = "scale.deployment"
+    elif action_type == "delete_pod":
+        operation_family = "pod.delete_stateless_pod"
+        target_kind = "Pod"
     elif action_type == "delete_stresschaos":
         operation_family = "chaos.delete_stresschaos"
         target_kind = "StressChaos"
@@ -80,7 +86,11 @@ def _synthesis_output(action_type: str, *, namespace: str = "default", name: str
                 command=["kubectl", action_type.replace("_", " ")],
                 expected_effect="Run the bounded remediation step.",
                 reversible=True,
-                verification_hints={"post_check": "crashloop"},
+                verification_hints=(
+                    {"post_check": "deployment_readiness_shortfall", "deployment": "cartservice", "min_ready_count": 1}
+                    if action_type == "delete_pod"
+                    else {"post_check": "crashloop"}
+                ),
             )
         ]
 
@@ -140,6 +150,24 @@ class VerificationEngineTest(unittest.TestCase):
 
     def test_build_shadow_verification_plan_returns_none_for_escalate(self) -> None:
         self.assertIsNone(build_shadow_verification_plan(_approved_action("escalate"), None, _incident_class_hint()))
+
+    def test_build_shadow_verification_plan_supports_delete_pod(self) -> None:
+        approved_action = _approved_action("delete_pod", name="cartservice-abcde")
+        plan = build_shadow_verification_plan(
+            approved_action,
+            _synthesis_output("delete_pod", name="cartservice-abcde"),
+            _incident_class_hint(),
+        )
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(
+            [check.check_type for check in plan.checks],
+            [
+                "kubernetes_resource_absent",
+                "prometheus_ready_count_at_least",
+            ],
+        )
 
     def test_run_verification_only_treats_not_found_as_resource_absent(self) -> None:
         plan = VerificationPlan(
@@ -211,6 +239,43 @@ class VerificationEngineTest(unittest.TestCase):
 
         self.assertEqual(result.status, "passed")
         self.assertEqual(prometheus.post_check_crashloop.call_count, 1)
+        self.assertTrue(all(check_result.passed for check_result in result.check_results))
+
+    def test_run_verification_supports_delete_pod_readiness_replacement(self) -> None:
+        plan = VerificationPlan(
+            verification_id="verify-delete-pod",
+            action_id="action-delete-pod",
+            action_type="delete_pod",
+            target=ResourceTarget(namespace="default", kind="Pod", name="cartservice-abcde"),
+            summary="Verify stateless pod replacement.",
+            checks=[
+                VerificationCheck(
+                    check_id="check-pod-absent",
+                    check_type="kubernetes_resource_absent",
+                    summary="Pod absent",
+                    parameters={"namespace": "default", "kind": "Pod", "name": "cartservice-abcde"},
+                ),
+                VerificationCheck(
+                    check_id="check-ready-count",
+                    check_type="prometheus_ready_count_at_least",
+                    summary="Ready count reached bounded target",
+                    parameters={"namespace": "default", "deployment": "cartservice", "min_ready_count": 1},
+                ),
+            ],
+        )
+
+        kubernetes = Mock(spec=KubernetesClient)
+        kubernetes.get_resource_json.return_value = {"returncode": 1, "stdout": "", "stderr": "Not Found"}
+        prometheus = Mock(spec=PrometheusClient)
+        prometheus.network_partition_receive_threshold = 100.0
+        prometheus.post_check_deployment_readiness_target.return_value = {
+            "ready_count": 1.0,
+            "min_ready_count": 1.0,
+        }
+
+        result = run_verification(plan, prometheus=prometheus, kubernetes=kubernetes)
+
+        self.assertEqual(result.status, "passed")
         self.assertTrue(all(check_result.passed for check_result in result.check_results))
 
     def test_run_verification_covers_all_bounded_check_types(self) -> None:

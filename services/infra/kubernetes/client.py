@@ -132,6 +132,31 @@ class KubernetesClient:
             "output": completed.stdout,
         }
 
+    def get_pod_context(self, *, namespace: str, pod: str) -> dict[str, object]:
+        command = [
+            "kubectl",
+            "get",
+            "pod",
+            pod,
+            "-n",
+            namespace,
+            "-o",
+            "json",
+        ]
+        completed = self._run(command)
+        payload = _parse_json_output(completed.stdout)
+        return {
+            "status": "succeeded" if completed.returncode == 0 else "failed",
+            "namespace": namespace,
+            "pod": pod,
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "output": completed.stdout,
+            "resource": payload,
+        }
+
     def get_rollout_history(self, *, namespace: str, deployment: str) -> dict[str, Any]:
         command = [
             "kubectl",
@@ -201,6 +226,208 @@ class KubernetesClient:
             "status": "succeeded" if completed.returncode == 0 else "failed",
             "namespace": namespace,
             "service": service,
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "output": completed.stdout,
+            "resource": payload,
+        }
+
+    def get_service_context(self, *, namespace: str, service: str) -> dict[str, Any]:
+        command = [
+            "kubectl",
+            "get",
+            "service",
+            service,
+            "-n",
+            namespace,
+            "-o",
+            "json",
+        ]
+        completed = self._run(command)
+        payload = _parse_json_output(completed.stdout)
+        return {
+            "status": "succeeded" if completed.returncode == 0 else "failed",
+            "namespace": namespace,
+            "service": service,
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "output": completed.stdout,
+            "resource": payload,
+        }
+
+    def get_config_map_context(self, *, namespace: str, name: str) -> dict[str, Any]:
+        command = [
+            "kubectl",
+            "get",
+            "configmap",
+            name,
+            "-n",
+            namespace,
+            "-o",
+            "json",
+        ]
+        completed = self._run(command)
+        payload = _parse_json_output(completed.stdout)
+        return {
+            "status": "succeeded" if completed.returncode == 0 else "failed",
+            "namespace": namespace,
+            "name": name,
+            "kind": "ConfigMap",
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "output": completed.stdout,
+            "resource": payload,
+        }
+
+    def get_secret_context_metadata(self, *, namespace: str, name: str) -> dict[str, Any]:
+        command = [
+            "kubectl",
+            "get",
+            "secret",
+            name,
+            "-n",
+            namespace,
+            "-o",
+            "json",
+        ]
+        completed = self._run(command)
+        payload = _parse_json_output(completed.stdout)
+        if isinstance(payload, dict):
+            sanitized = {
+                "metadata": payload.get("metadata"),
+                "type": payload.get("type"),
+                "data_keys": sorted(payload.get("data", {}).keys()) if isinstance(payload.get("data"), dict) else [],
+            }
+        else:
+            sanitized = None
+        return {
+            "status": "succeeded" if completed.returncode == 0 else "failed",
+            "namespace": namespace,
+            "name": name,
+            "kind": "Secret",
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "output": completed.stdout,
+            "resource": sanitized,
+        }
+
+    def list_endpoint_slices(self, *, namespace: str, service: str) -> dict[str, Any]:
+        command = [
+            "kubectl",
+            "get",
+            "endpointslices",
+            "-n",
+            namespace,
+            "-l",
+            f"kubernetes.io/service-name={service}",
+            "-o",
+            "json",
+        ]
+        completed = self._run(command)
+        payload = _parse_json_output(completed.stdout)
+        return {
+            "status": "succeeded" if completed.returncode == 0 else "failed",
+            "namespace": namespace,
+            "service": service,
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "output": completed.stdout,
+            "resource": payload,
+        }
+
+    def list_horizontal_pod_autoscalers(self, *, namespace: str) -> dict[str, Any]:
+        command = [
+            "kubectl",
+            "get",
+            "hpa",
+            "-n",
+            namespace,
+            "-o",
+            "json",
+        ]
+        completed = self._run(command)
+        payload = _parse_json_output(completed.stdout)
+        return {
+            "status": "succeeded" if completed.returncode == 0 else "failed",
+            "namespace": namespace,
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "output": completed.stdout,
+            "resource": payload,
+        }
+
+    def list_persistent_volume_claims(self, *, namespace: str) -> dict[str, Any]:
+        command = [
+            "kubectl",
+            "get",
+            "pvc",
+            "-n",
+            namespace,
+            "-o",
+            "json",
+        ]
+        completed = self._run(command)
+        payload = _parse_json_output(completed.stdout)
+        return {
+            "status": "succeeded" if completed.returncode == 0 else "failed",
+            "namespace": namespace,
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "output": completed.stdout,
+            "resource": payload,
+        }
+
+    def get_resource_quotas(self, *, namespace: str) -> dict[str, Any]:
+        command = [
+            "kubectl",
+            "get",
+            "resourcequota",
+            "-n",
+            namespace,
+            "-o",
+            "json",
+        ]
+        completed = self._run(command)
+        payload = _parse_json_output(completed.stdout)
+        return {
+            "status": "succeeded" if completed.returncode == 0 else "failed",
+            "namespace": namespace,
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "output": completed.stdout,
+            "resource": payload,
+        }
+
+    def get_node_conditions(self, *, node: str) -> dict[str, Any]:
+        command = [
+            "kubectl",
+            "get",
+            "node",
+            node,
+            "-o",
+            "json",
+        ]
+        completed = self._run(command)
+        payload = _parse_json_output(completed.stdout)
+        return {
+            "status": "succeeded" if completed.returncode == 0 else "failed",
+            "node": node,
             "command": command,
             "returncode": completed.returncode,
             "stdout": completed.stdout,
@@ -372,6 +599,28 @@ class KubernetesClient:
             "namespace": namespace,
             "deployment": deployment,
             "replicas": replicas,
+            "command": command,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+        }
+
+    def delete_pod(self, *, namespace: str, pod: str, deployment: str | None = None) -> dict[str, object]:
+        del deployment
+        command = [
+            "kubectl",
+            "delete",
+            "pod",
+            pod,
+            "-n",
+            namespace,
+        ]
+        completed = self._run(command)
+        return {
+            "status": "succeeded" if completed.returncode == 0 else "failed",
+            "action_type": "delete_pod",
+            "namespace": namespace,
+            "pod": pod,
             "command": command,
             "returncode": completed.returncode,
             "stdout": completed.stdout,

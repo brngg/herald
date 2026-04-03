@@ -62,8 +62,45 @@ class ClusterObserver:
                 "get_events",
                 lambda: self.kubernetes_client.get_events(namespace=namespace),
             )
+            kubernetes["resource_quotas"] = self._safe_kubernetes_call(
+                errors,
+                "get_resource_quotas",
+                lambda: self.kubernetes_client.get_resource_quotas(namespace=namespace),
+            )
+            kubernetes["persistent_volume_claims"] = self._safe_kubernetes_call(
+                errors,
+                "list_persistent_volume_claims",
+                lambda: self.kubernetes_client.list_persistent_volume_claims(namespace=namespace),
+            )
+            kubernetes["horizontal_pod_autoscalers"] = self._safe_kubernetes_call(
+                errors,
+                "list_horizontal_pod_autoscalers",
+                lambda: self.kubernetes_client.list_horizontal_pod_autoscalers(namespace=namespace),
+            )
             kubernetes["pod_status_summary"] = _summarize_pods_result(kubernetes.get("pods"))
             kubernetes["event_summary"] = _summarize_events_result(kubernetes.get("events"))
+            kubernetes["resource_quota_summary"] = _summarize_resource_quotas_result(
+                kubernetes.get("resource_quotas")
+            )
+            kubernetes["pvc_summary"] = _summarize_persistent_volume_claims_result(
+                kubernetes.get("persistent_volume_claims")
+            )
+            kubernetes["hpa_summary"] = _summarize_horizontal_pod_autoscalers_result(
+                kubernetes.get("horizontal_pod_autoscalers")
+            )
+            node_names = list(kubernetes["pod_status_summary"].get("node_names", []))
+            if node_names:
+                kubernetes["node_conditions"] = [
+                    self._safe_kubernetes_call(
+                        errors,
+                        "get_node_conditions",
+                        lambda node_name=node_name: self.kubernetes_client.get_node_conditions(node=node_name),
+                    )
+                    for node_name in node_names[:3]
+                ]
+                kubernetes["node_condition_summary"] = _summarize_node_conditions_results(
+                    kubernetes.get("node_conditions")
+                )
 
         if namespace is not None and deployment_hint is not None:
             kubernetes["deployment"] = self._safe_kubernetes_call(
@@ -94,8 +131,52 @@ class ClusterObserver:
             kubernetes["deployment_summary"] = _summarize_deployment_result(kubernetes.get("deployment"))
             kubernetes["replica_set_summary"] = _summarize_replica_sets_result(kubernetes.get("replica_sets"))
             kubernetes["rollout_summary"] = _summarize_rollout_history_result(kubernetes.get("rollout_history"))
+            deployment_summary = kubernetes.get("deployment_summary")
+            if isinstance(deployment_summary, dict):
+                config_refs = list(deployment_summary.get("config_map_refs", []))
+                secret_refs = list(deployment_summary.get("secret_refs", []))
+                if config_refs:
+                    kubernetes["config_maps"] = [
+                        self._safe_kubernetes_call(
+                            errors,
+                            "get_config_map_context",
+                            lambda name=name: self.kubernetes_client.get_config_map_context(
+                                namespace=namespace,
+                                name=name,
+                            ),
+                        )
+                        for name in config_refs[:5]
+                    ]
+                    kubernetes["config_map_summary"] = _summarize_config_objects(
+                        kubernetes.get("config_maps"),
+                        kind="ConfigMap",
+                    )
+                if secret_refs:
+                    kubernetes["secrets"] = [
+                        self._safe_kubernetes_call(
+                            errors,
+                            "get_secret_context_metadata",
+                            lambda name=name: self.kubernetes_client.get_secret_context_metadata(
+                                namespace=namespace,
+                                name=name,
+                            ),
+                        )
+                        for name in secret_refs[:5]
+                    ]
+                    kubernetes["secret_summary"] = _summarize_config_objects(
+                        kubernetes.get("secrets"),
+                        kind="Secret",
+                    )
 
         if namespace is not None and service_hint is not None:
+            kubernetes["service"] = self._safe_kubernetes_call(
+                errors,
+                "get_service_context",
+                lambda: self.kubernetes_client.get_service_context(
+                    namespace=namespace,
+                    service=service_hint,
+                ),
+            )
             kubernetes["service_endpoints"] = self._safe_kubernetes_call(
                 errors,
                 "get_service_endpoints",
@@ -104,9 +185,28 @@ class ClusterObserver:
                     service=service_hint,
                 ),
             )
+            kubernetes["endpoint_slices"] = self._safe_kubernetes_call(
+                errors,
+                "list_endpoint_slices",
+                lambda: self.kubernetes_client.list_endpoint_slices(
+                    namespace=namespace,
+                    service=service_hint,
+                ),
+            )
+            kubernetes["service_summary"] = _summarize_service_result(kubernetes.get("service"))
             kubernetes["endpoint_summary"] = _summarize_service_endpoints_result(
                 kubernetes.get("service_endpoints")
             )
+            kubernetes["endpoint_slice_summary"] = _summarize_endpoint_slices_result(
+                kubernetes.get("endpoint_slices")
+            )
+
+        kubernetes["dependency_summary"] = _summarize_dependency_context(
+            deployment_summary=kubernetes.get("deployment_summary"),
+            service_summary=kubernetes.get("service_summary"),
+            endpoint_summary=kubernetes.get("endpoint_summary"),
+            endpoint_slice_summary=kubernetes.get("endpoint_slice_summary"),
+        )
 
         if namespace is not None and pod is not None:
             pod_logs = self._safe_kubernetes_call(
@@ -297,11 +397,17 @@ def _summarize_pods_result(result: Any) -> dict[str, Any]:
     non_ready_pods: list[str] = []
     restart_total = 0
     ready_pod_count = 0
+    node_names: set[str] = set()
 
     for item in items:
         metadata = item.get("metadata")
+        spec = item.get("spec")
         status = item.get("status")
         pod_name = metadata.get("name") if isinstance(metadata, dict) else None
+        if isinstance(spec, dict):
+            node_name = spec.get("nodeName")
+            if isinstance(node_name, str) and node_name:
+                node_names.add(node_name)
         if not isinstance(status, dict):
             continue
         container_statuses = status.get("containerStatuses")
@@ -339,6 +445,7 @@ def _summarize_pods_result(result: Any) -> dict[str, Any]:
         "waiting_reasons": waiting_reasons,
         "termination_reasons": termination_reasons,
         "non_ready_pods": non_ready_pods[:5],
+        "node_names": sorted(node_names),
     }
 
 
@@ -533,6 +640,236 @@ def _summarize_service_endpoints_result(result: Any) -> dict[str, Any]:
         "not_ready_address_count": not_ready_address_count,
         "ports": sorted(set(ports)),
     }
+
+
+def _summarize_service_result(result: Any) -> dict[str, Any]:
+    resource = _resource_dict(result)
+    if not resource:
+        return {}
+    metadata = resource.get("metadata")
+    spec = resource.get("spec")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    spec = spec if isinstance(spec, dict) else {}
+    ports = spec.get("ports")
+    selector = spec.get("selector")
+    summarized_ports: list[dict[str, Any]] = []
+    if isinstance(ports, list):
+        for item in ports:
+            if not isinstance(item, dict):
+                continue
+            summarized_ports.append(
+                {
+                    "name": item.get("name"),
+                    "port": item.get("port"),
+                    "target_port": item.get("targetPort"),
+                    "protocol": item.get("protocol"),
+                }
+            )
+    return {
+        "name": metadata.get("name"),
+        "type": spec.get("type"),
+        "selector": dict(selector) if isinstance(selector, dict) else {},
+        "ports": summarized_ports,
+    }
+
+
+def _summarize_endpoint_slices_result(result: Any) -> dict[str, Any]:
+    items = _resource_items(result)
+    ready_endpoint_count = 0
+    not_ready_endpoint_count = 0
+    endpoint_count = 0
+    ports: list[int] = []
+    for item in items:
+        endpoints = item.get("endpoints")
+        if isinstance(endpoints, list):
+            for endpoint in endpoints:
+                if not isinstance(endpoint, dict):
+                    continue
+                endpoint_count += 1
+                conditions = endpoint.get("conditions")
+                conditions = conditions if isinstance(conditions, dict) else {}
+                if conditions.get("ready") is False:
+                    not_ready_endpoint_count += 1
+                else:
+                    ready_endpoint_count += 1
+        slice_ports = item.get("ports")
+        if isinstance(slice_ports, list):
+            for port_item in slice_ports:
+                if not isinstance(port_item, dict):
+                    continue
+                port = port_item.get("port")
+                if isinstance(port, int):
+                    ports.append(port)
+    return {
+        "endpoint_slice_count": len(items),
+        "endpoint_count": endpoint_count,
+        "ready_endpoint_count": ready_endpoint_count,
+        "not_ready_endpoint_count": not_ready_endpoint_count,
+        "ports": sorted(set(ports)),
+    }
+
+
+def _summarize_dependency_context(
+    *,
+    deployment_summary: Any,
+    service_summary: Any,
+    endpoint_summary: Any,
+    endpoint_slice_summary: Any,
+) -> dict[str, Any]:
+    deployment_summary = deployment_summary if isinstance(deployment_summary, dict) else {}
+    service_summary = service_summary if isinstance(service_summary, dict) else {}
+    endpoint_summary = endpoint_summary if isinstance(endpoint_summary, dict) else {}
+    endpoint_slice_summary = (
+        endpoint_slice_summary if isinstance(endpoint_slice_summary, dict) else {}
+    )
+    return {
+        "config_map_refs": list(deployment_summary.get("config_map_refs", [])),
+        "secret_refs": list(deployment_summary.get("secret_refs", [])),
+        "service_selector": dict(service_summary.get("selector", {}))
+        if isinstance(service_summary.get("selector"), dict)
+        else {},
+        "service_port_count": len(service_summary.get("ports", []))
+        if isinstance(service_summary.get("ports"), list)
+        else 0,
+        "endpoint_address_count": _as_non_negative_int(endpoint_summary.get("address_count")),
+        "endpoint_not_ready_count": _as_non_negative_int(
+            endpoint_summary.get("not_ready_address_count")
+        ),
+        "endpoint_slice_ready_count": _as_non_negative_int(
+            endpoint_slice_summary.get("ready_endpoint_count")
+        ),
+        "endpoint_slice_not_ready_count": _as_non_negative_int(
+            endpoint_slice_summary.get("not_ready_endpoint_count")
+        ),
+    }
+
+
+def _summarize_config_objects(results: Any, *, kind: str) -> dict[str, Any]:
+    if not isinstance(results, list):
+        return {}
+    summaries: list[dict[str, Any]] = []
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        resource = _resource_dict(result)
+        metadata = resource.get("metadata") if isinstance(resource, dict) else {}
+        metadata = metadata if isinstance(metadata, dict) else {}
+        summary = {
+            "name": metadata.get("name") or result.get("name"),
+            "exists": result.get("status") == "succeeded",
+            "resource_version": metadata.get("resourceVersion"),
+        }
+        if kind == "ConfigMap":
+            data = resource.get("data") if isinstance(resource, dict) else {}
+            summary["data_key_count"] = len(data) if isinstance(data, dict) else 0
+        if kind == "Secret":
+            summary["type"] = resource.get("type") if isinstance(resource, dict) else None
+            data_keys = resource.get("data_keys") if isinstance(resource, dict) else []
+            summary["data_keys"] = list(data_keys) if isinstance(data_keys, list) else []
+        summaries.append(summary)
+    return {
+        "count": len(summaries),
+        "objects": summaries[:5],
+    }
+
+
+def _summarize_node_conditions_results(results: Any) -> dict[str, Any]:
+    if not isinstance(results, list):
+        return {}
+    summaries: list[dict[str, Any]] = []
+    for result in results:
+        resource = _resource_dict(result)
+        metadata = resource.get("metadata") if isinstance(resource, dict) else {}
+        status = resource.get("status") if isinstance(resource, dict) else {}
+        metadata = metadata if isinstance(metadata, dict) else {}
+        status = status if isinstance(status, dict) else {}
+        node_conditions: dict[str, str] = {}
+        conditions = status.get("conditions")
+        if isinstance(conditions, list):
+            for condition in conditions:
+                if not isinstance(condition, dict):
+                    continue
+                condition_type = condition.get("type")
+                condition_status = condition.get("status")
+                if isinstance(condition_type, str) and isinstance(condition_status, str):
+                    node_conditions[condition_type] = condition_status
+        summaries.append(
+            {
+                "node": metadata.get("name") or result.get("node"),
+                "conditions": node_conditions,
+            }
+        )
+    return {
+        "node_count": len(summaries),
+        "nodes": summaries,
+    }
+
+
+def _summarize_horizontal_pod_autoscalers_result(result: Any) -> dict[str, Any]:
+    items = _resource_items(result)
+    summaries: list[dict[str, Any]] = []
+    for item in items:
+        metadata = item.get("metadata")
+        spec = item.get("spec")
+        status = item.get("status")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        spec = spec if isinstance(spec, dict) else {}
+        status = status if isinstance(status, dict) else {}
+        summaries.append(
+            {
+                "name": metadata.get("name"),
+                "min_replicas": _as_non_negative_int(spec.get("minReplicas")),
+                "max_replicas": _as_non_negative_int(spec.get("maxReplicas")),
+                "current_replicas": _as_non_negative_int(status.get("currentReplicas")),
+                "desired_replicas": _as_non_negative_int(status.get("desiredReplicas")),
+            }
+        )
+    return {"hpa_count": len(summaries), "hpas": summaries[:10]}
+
+
+def _summarize_persistent_volume_claims_result(result: Any) -> dict[str, Any]:
+    items = _resource_items(result)
+    summaries: list[dict[str, Any]] = []
+    for item in items:
+        metadata = item.get("metadata")
+        status = item.get("status")
+        spec = item.get("spec")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        status = status if isinstance(status, dict) else {}
+        spec = spec if isinstance(spec, dict) else {}
+        summaries.append(
+            {
+                "name": metadata.get("name"),
+                "phase": status.get("phase"),
+                "storage_class": spec.get("storageClassName"),
+            }
+        )
+    pending = [summary["name"] for summary in summaries if summary.get("phase") != "Bound"]
+    return {
+        "pvc_count": len(summaries),
+        "pending_claim_count": len(pending),
+        "pending_claims": pending[:10],
+    }
+
+
+def _summarize_resource_quotas_result(result: Any) -> dict[str, Any]:
+    items = _resource_items(result)
+    quotas: list[dict[str, Any]] = []
+    for item in items:
+        metadata = item.get("metadata")
+        status = item.get("status")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        status = status if isinstance(status, dict) else {}
+        used = status.get("used")
+        hard = status.get("hard")
+        quotas.append(
+            {
+                "name": metadata.get("name"),
+                "used": dict(used) if isinstance(used, dict) else {},
+                "hard": dict(hard) if isinstance(hard, dict) else {},
+            }
+        )
+    return {"quota_count": len(quotas), "quotas": quotas[:5]}
 
 
 def _collect_env_references(

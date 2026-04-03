@@ -112,7 +112,7 @@ def _candidates() -> list[ApprovalCandidate]:
 
 
 class HITLGateTest(unittest.TestCase):
-    def test_route_crashloop_plan_surfaces_single_recommended_action(self) -> None:
+    def test_route_crashloop_plan_surfaces_single_recommended_candidate(self) -> None:
         decision = route_crashloop_plan(
             incident=_incident(),
             actions=_actions(),
@@ -123,9 +123,9 @@ class HITLGateTest(unittest.TestCase):
 
         self.assertEqual(decision.routing_decision, "request_approval_single_action")
         self.assertTrue(decision.requires_approval)
-        self.assertIsNotNone(decision.recommended_action)
-        self.assertEqual(decision.recommended_action.action_id, "undo-cartservice")
-        self.assertEqual(decision.candidate_actions[0].action_id, "undo-cartservice")
+        self.assertIsNotNone(decision.recommended_candidate)
+        self.assertEqual(decision.recommended_candidate.candidate_id, "undo-cartservice")
+        self.assertEqual(decision.candidate_options[0].candidate_id, "undo-cartservice")
 
         trace = decision.decision_trace
         self.assertEqual(trace.incident_id, "trace-123")
@@ -133,7 +133,8 @@ class HITLGateTest(unittest.TestCase):
         self.assertEqual(trace.routing_decision, "request_approval_single_action")
         self.assertEqual(trace.human_approval, "n/a")
         self.assertEqual(trace.final_state, "pending_approval")
-        self.assertIn("actions", trace.fixer_plan)
+        self.assertIn("candidate_options", trace.fixer_plan)
+        self.assertEqual(trace.fixer_plan["candidate_options"][0]["candidate_id"], "undo-cartservice")
         self.assertEqual(trace.execution_result, {})
         self.assertEqual(trace.verification_result, {})
 

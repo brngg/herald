@@ -425,6 +425,11 @@ def _approved_readonly_arguments(
     dispatch: ExecutionDispatch,
     tool_name: ExecutionToolName,
 ) -> dict[str, Any]:
+    if tool_name == "get_pod_context":
+        return {
+            "namespace": dispatch.parameters["namespace"],
+            "pod": dispatch.parameters["pod"],
+        }
     if tool_name in {"get_deployment_context", "get_rollout_status"}:
         return {
             "namespace": dispatch.parameters["namespace"],
@@ -459,12 +464,14 @@ def _get_gemini_api_key() -> str:
 def _valid_tool_names() -> tuple[ExecutionToolName, ...]:
     return (
         "get_deployment_context",
+        "get_pod_context",
         "get_rollout_status",
         "get_stresschaos",
         "get_networkchaos",
         "rollout_undo_deployment",
         "rollout_restart_deployment",
         "scale_deployment",
+        "delete_pod",
         "delete_stresschaos",
         "delete_networkchaos",
     )

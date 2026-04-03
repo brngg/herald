@@ -134,7 +134,59 @@ def _build_prometheus_client(scenario: dict[str, Any]) -> PrometheusClient:
 
 def _build_kubernetes_client(scenario: dict[str, Any]) -> KubernetesClient:
     kubernetes_config = dict(scenario.get("kubernetes", {}))
+    pods_status = dict(
+        kubernetes_config.get(
+            "pods",
+            _completed_process_payload(0, '{"items":[]}', ""),
+        )
+    )
+    events_status = dict(
+        kubernetes_config.get(
+            "events",
+            _completed_process_payload(0, '{"items":[]}', ""),
+        )
+    )
+    resource_quotas_status = dict(
+        kubernetes_config.get(
+            "resource_quotas",
+            _completed_process_payload(0, '{"items":[]}', ""),
+        )
+    )
+    pvc_status = dict(
+        kubernetes_config.get(
+            "persistent_volume_claims",
+            _completed_process_payload(0, '{"items":[]}', ""),
+        )
+    )
+    hpa_status = dict(
+        kubernetes_config.get(
+            "horizontal_pod_autoscalers",
+            _completed_process_payload(0, '{"items":[]}', ""),
+        )
+    )
+    pod_context_status = dict(
+        kubernetes_config.get(
+            "pod_context",
+            _completed_process_payload(0, '{"metadata":{"name":"pod"}}', ""),
+        )
+    )
+    pod_logs_status = dict(
+        kubernetes_config.get(
+            "pod_logs",
+            _completed_process_payload(0, "", ""),
+        )
+    )
     rollout_status = dict(kubernetes_config.get("rollout_status", _completed_process_payload(0, "ok\n", "")))
+    deployment_status = dict(
+        kubernetes_config.get(
+            "deployment",
+            _completed_process_payload(
+                0,
+                '{"metadata":{"name":"frontend","generation":1},"spec":{"replicas":1,"template":{"spec":{"containers":[{"image":"example.com/app:v1"}]}}},"status":{"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"observedGeneration":1}}',
+                "",
+            ),
+        )
+    )
     deployment_availability = dict(
         kubernetes_config.get(
             "deployment_availability",
@@ -143,6 +195,54 @@ def _build_kubernetes_client(scenario: dict[str, Any]) -> KubernetesClient:
                 '{"status":{"availableReplicas":1,"readyReplicas":1,"observedGeneration":1}}',
                 "",
             ),
+        )
+    )
+    rollout_history_status = dict(
+        kubernetes_config.get(
+            "rollout_history",
+            _completed_process_payload(0, "deployment.apps/frontend\nREVISION  CHANGE-CAUSE\n1         baseline\n", ""),
+        )
+    )
+    replica_sets_status = dict(
+        kubernetes_config.get(
+            "replica_sets",
+            _completed_process_payload(0, '{"items":[]}', ""),
+        )
+    )
+    service_status = dict(
+        kubernetes_config.get(
+            "service",
+            _completed_process_payload(0, '{"metadata":{"name":"frontend"},"spec":{"selector":{"app":"frontend"},"ports":[{"port":80}]}}', ""),
+        )
+    )
+    service_endpoints_status = dict(
+        kubernetes_config.get(
+            "service_endpoints",
+            _completed_process_payload(0, '{"subsets":[]}', ""),
+        )
+    )
+    endpoint_slices_status = dict(
+        kubernetes_config.get(
+            "endpoint_slices",
+            _completed_process_payload(0, '{"items":[]}', ""),
+        )
+    )
+    config_map_status = dict(
+        kubernetes_config.get(
+            "config_map",
+            _completed_process_payload(0, '{"metadata":{"name":"config"}}', ""),
+        )
+    )
+    secret_status = dict(
+        kubernetes_config.get(
+            "secret",
+            _completed_process_payload(0, '{"metadata":{"name":"secret"},"type":"Opaque","data":{"key":"redacted"}}', ""),
+        )
+    )
+    node_conditions_status = dict(
+        kubernetes_config.get(
+            "node_conditions",
+            _completed_process_payload(0, '{"metadata":{"name":"minikube"},"status":{"conditions":[{"type":"Ready","status":"True"}]}}', ""),
         )
     )
     stresschaos_status = dict(
@@ -158,35 +258,55 @@ def _build_kubernetes_client(scenario: dict[str, Any]) -> KubernetesClient:
         )
     )
 
+    def _completed(command: list[str], payload: dict[str, Any]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=list(command),
+            returncode=int(payload["returncode"]),
+            stdout=str(payload["stdout"]),
+            stderr=str(payload["stderr"]),
+        )
+
     def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+        if command[:3] == ["kubectl", "get", "pods"]:
+            return _completed(command, pods_status)
+        if command[:3] == ["kubectl", "get", "events"]:
+            return _completed(command, events_status)
+        if command[:3] == ["kubectl", "get", "resourcequota"]:
+            return _completed(command, resource_quotas_status)
+        if command[:3] == ["kubectl", "get", "pvc"]:
+            return _completed(command, pvc_status)
+        if command[:3] == ["kubectl", "get", "hpa"]:
+            return _completed(command, hpa_status)
+        if command[:3] == ["kubectl", "get", "pod"]:
+            return _completed(command, pod_context_status)
+        if command[:2] == ["kubectl", "logs"]:
+            return _completed(command, pod_logs_status)
         if command[:3] == ["kubectl", "rollout", "status"]:
-            return subprocess.CompletedProcess(
-                args=list(command),
-                returncode=int(rollout_status["returncode"]),
-                stdout=str(rollout_status["stdout"]),
-                stderr=str(rollout_status["stderr"]),
-            )
+            return _completed(command, rollout_status)
+        if command[:3] == ["kubectl", "rollout", "history"]:
+            return _completed(command, rollout_history_status)
         if command[:3] == ["kubectl", "get", "deployment"]:
-            return subprocess.CompletedProcess(
-                args=list(command),
-                returncode=int(deployment_availability["returncode"]),
-                stdout=str(deployment_availability["stdout"]),
-                stderr=str(deployment_availability["stderr"]),
-            )
+            if "-o" in command:
+                return _completed(command, deployment_status)
+            return _completed(command, deployment_availability)
+        if command[:3] == ["kubectl", "get", "replicasets"]:
+            return _completed(command, replica_sets_status)
+        if command[:3] == ["kubectl", "get", "service"]:
+            return _completed(command, service_status)
+        if command[:3] == ["kubectl", "get", "endpoints"]:
+            return _completed(command, service_endpoints_status)
+        if command[:3] == ["kubectl", "get", "endpointslices"]:
+            return _completed(command, endpoint_slices_status)
+        if command[:3] == ["kubectl", "get", "configmap"]:
+            return _completed(command, config_map_status)
+        if command[:3] == ["kubectl", "get", "secret"]:
+            return _completed(command, secret_status)
+        if command[:3] == ["kubectl", "get", "node"]:
+            return _completed(command, node_conditions_status)
         if command[:3] == ["kubectl", "get", "stresschaos"]:
-            return subprocess.CompletedProcess(
-                args=list(command),
-                returncode=int(stresschaos_status["returncode"]),
-                stdout=str(stresschaos_status["stdout"]),
-                stderr=str(stresschaos_status["stderr"]),
-            )
+            return _completed(command, stresschaos_status)
         if command[:3] == ["kubectl", "get", "networkchaos"]:
-            return subprocess.CompletedProcess(
-                args=list(command),
-                returncode=int(networkchaos_status["returncode"]),
-                stdout=str(networkchaos_status["stdout"]),
-                stderr=str(networkchaos_status["stderr"]),
-            )
+            return _completed(command, networkchaos_status)
         if command[:3] == ["kubectl", "rollout", "undo"]:
             deployment = command[3].split("/", 1)[1] if len(command) > 3 and "/" in command[3] else "cartservice"
             return subprocess.CompletedProcess(
@@ -201,6 +321,22 @@ def _build_kubernetes_client(scenario: dict[str, Any]) -> KubernetesClient:
                 args=list(command),
                 returncode=0,
                 stdout=f"deployment.apps/{deployment} restarted\n",
+                stderr="",
+            )
+        if command[:3] == ["kubectl", "scale", "deployment/frontend"]:
+            replicas = command[-1].split("=", 1)[1] if command[-1].startswith("--replicas=") else "1"
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout=f"deployment.apps/frontend scaled to {replicas}\n",
+                stderr="",
+            )
+        if command[:3] == ["kubectl", "delete", "pod"]:
+            pod_name = command[3] if len(command) > 3 else "pod"
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout=f'pod "{pod_name}" deleted\n',
                 stderr="",
             )
         if command[:3] == ["kubectl", "delete", "stresschaos"]:

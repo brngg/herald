@@ -43,6 +43,21 @@ def intent_to_v1_remediation(intent: OperationIntent) -> RemediationAction | Non
             parameters={"namespace": namespace, "deployment": name, "replicas": replicas},
         )
 
+    if intent.operation_family == "pod.delete_stateless_pod" and name:
+        deployment = str(intent.arguments.get("deployment") or "")
+        parameters = {"namespace": namespace, "pod": name}
+        if deployment:
+            parameters["deployment"] = deployment
+        return RemediationAction(
+            action_id=f"delete_{name}",
+            action_type="delete_pod",
+            description=f"Delete stateless Pod {name} in namespace {namespace} so it can be recreated safely.",
+            confidence_score=intent.confidence_score,
+            blast_radius_score=intent.blast_radius_score,
+            requires_approval=intent.requires_approval,
+            parameters=parameters,
+        )
+
     if intent.operation_family == "chaos.delete_stresschaos" and name:
         return RemediationAction(
             action_id="delete_frontend_cpu_stresschaos",

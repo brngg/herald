@@ -11,6 +11,7 @@ ActionTypes = Literal[
     "set_deployment_env_var",
     "apply_k8s_manifest",
     "scale_deployment",
+    "delete_pod",
     "escalate",
     "do_nothing",
 ]
@@ -23,6 +24,7 @@ VALID_ACTION_TYPES: tuple[ActionTypes, ...] = (
     "set_deployment_env_var",
     "apply_k8s_manifest",
     "scale_deployment",
+    "delete_pod",
     "escalate",
     "do_nothing",
 )
@@ -77,6 +79,14 @@ class RemediationAction:
 
         if self.action_type == "escalate":
             _require_non_empty_string(self.parameters, "reason", self.action_type)
+            return
+
+        if self.action_type == "delete_pod":
+            _require_non_empty_string(self.parameters, "namespace", self.action_type)
+            _require_non_empty_string(self.parameters, "pod", self.action_type)
+            deployment = self.parameters.get("deployment")
+            if deployment is not None and (not isinstance(deployment, str) or not deployment):
+                raise TypeError(f"{self.action_type} parameters must include non-empty string 'deployment' when provided")
             return
 
 

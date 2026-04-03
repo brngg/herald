@@ -7,6 +7,10 @@ from schemas.approval import ApprovalCandidate
 from schemas.decision_trace import DecisionTrace, FinalState, HumanApproval
 from schemas.incident import Incident
 from schemas.remediation import RemediationAction
+from workflows.runtime.approval_adapters import (
+    legacy_action_for_candidate,
+    upgrade_legacy_action_to_candidate,
+)
 
 
 CONFIDENCE_PROMOTE_THRESHOLD = 0.85
@@ -20,10 +24,25 @@ class HITLDecision:
     routing_decision: str
     requires_approval: bool
     decision_trace: DecisionTrace
-    recommended_action: RemediationAction | None = None
-    candidate_actions: list[RemediationAction] = field(default_factory=list)
     recommended_candidate: ApprovalCandidate | None = None
     candidate_options: list[ApprovalCandidate] = field(default_factory=list)
+
+    @property
+    def recommended_action(self) -> RemediationAction | None:
+        if self.recommended_candidate is None:
+            return None
+        return legacy_action_for_candidate(self.recommended_candidate)
+
+    @property
+    def candidate_actions(self) -> list[RemediationAction]:
+        return [
+            action
+            for action in (
+                legacy_action_for_candidate(candidate)
+                for candidate in self.candidate_options
+            )
+            if action is not None
+        ]
 
 
 def route_plan(
@@ -35,27 +54,28 @@ def route_plan(
     judge_reason: str,
 ) -> HITLDecision:
     ranked_actions = _rank_actions(actions)
-    recommended_action = ranked_actions[0] if ranked_actions else None
+    ranked_candidates = [upgrade_legacy_action_to_candidate(action) for action in ranked_actions]
+    recommended_candidate = ranked_candidates[0] if ranked_candidates else None
 
     if judge_verdict != "pass":
         routing_decision = "halt"
-    elif not ranked_actions:
+    elif not ranked_candidates:
         routing_decision = "halt"
-    elif recommended_action.blast_radius_score >= BLAST_RADIUS_BLOCK_THRESHOLD:
+    elif recommended_candidate.blast_radius_score >= BLAST_RADIUS_BLOCK_THRESHOLD:
         routing_decision = "request_approval_ranked_options"
     elif (
-        recommended_action.confidence_score >= CONFIDENCE_PROMOTE_THRESHOLD
-        and recommended_action.blast_radius_score < BLAST_RADIUS_WARN_THRESHOLD
+        recommended_candidate.confidence_score >= CONFIDENCE_PROMOTE_THRESHOLD
+        and recommended_candidate.blast_radius_score < BLAST_RADIUS_WARN_THRESHOLD
     ):
         routing_decision = "request_approval_single_action"
-    elif recommended_action.confidence_score < CONFIDENCE_HIDE_THRESHOLD:
+    elif recommended_candidate.confidence_score < CONFIDENCE_HIDE_THRESHOLD:
         routing_decision = "request_approval_ranked_options"
     else:
         routing_decision = "request_approval_ranked_options"
 
     trace = DecisionTrace(
         incident_id=incident.incident_id,
-        fixer_plan=_serialize_fixer_plan(ranked_actions, fixer_rationale),
+        fixer_plan=_serialize_candidate_plan(ranked_candidates, fixer_rationale),
         judge_verdict=judge_verdict,
         judge_reason=judge_reason,
         routing_decision=routing_decision,
@@ -68,9 +88,9 @@ def route_plan(
 
     return HITLDecision(
         routing_decision=routing_decision,
-        requires_approval=routing_decision != "halt" and bool(ranked_actions),
-        recommended_action=recommended_action,
-        candidate_actions=ranked_actions,
+        requires_approval=routing_decision != "halt" and bool(ranked_candidates),
+        recommended_candidate=recommended_candidate,
+        candidate_options=ranked_candidates,
         decision_trace=trace,
     )
 
@@ -189,27 +209,6 @@ def _rank_candidates(candidates: list[ApprovalCandidate]) -> list[ApprovalCandid
             candidate.candidate_id,
         ),
     )
-
-
-def _serialize_fixer_plan(
-    actions: list[RemediationAction],
-    fixer_rationale: str | None,
-) -> dict[str, Any]:
-    return {
-        "actions": [
-            {
-                "action_id": action.action_id,
-                "action_type": action.action_type,
-                "description": action.description,
-                "confidence_score": action.confidence_score,
-                "blast_radius_score": action.blast_radius_score,
-                "requires_approval": action.requires_approval,
-                "parameters": action.parameters,
-            }
-            for action in actions
-        ],
-        "fixer_rationale": fixer_rationale or "",
-    }
 
 
 def _serialize_candidate_plan(

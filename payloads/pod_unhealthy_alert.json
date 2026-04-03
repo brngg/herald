@@ -1,0 +1,44 @@
+{
+  "receiver": "default/herald-webhook-routing/herald-webhook",
+  "status": "firing",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HeraldPodUnhealthy",
+        "incident_class": "unknown",
+        "namespace": "default",
+        "deployment": "cartservice",
+        "pod": "cartservice-abcde",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "one cartservice pod is unhealthy",
+        "description": "A single cartservice pod is unhealthy while the deployment still has healthy capacity."
+      },
+      "startsAt": "2026-03-23T20:00:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus/graph",
+      "fingerprint": "podreplace123"
+    }
+  ],
+  "groupLabels": {
+    "alertname": "HeraldPodUnhealthy",
+    "incident_class": "unknown",
+    "namespace": "default"
+  },
+  "commonLabels": {
+    "alertname": "HeraldPodUnhealthy",
+    "incident_class": "unknown",
+    "namespace": "default",
+    "deployment": "cartservice",
+    "severity": "warning"
+  },
+  "commonAnnotations": {
+    "summary": "one cartservice pod is unhealthy"
+  },
+  "externalURL": "http://alertmanager",
+  "version": "4",
+  "groupKey": "{}/{namespace=\"default\"}:{alertname=\"HeraldPodUnhealthy\"}",
+  "truncatedAlerts": 0
+}

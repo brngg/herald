@@ -351,6 +351,78 @@ class ExecutionWorkerTest(unittest.TestCase):
             ],
         )
 
+    def test_execute_dispatch_supports_delete_pod(self) -> None:
+        commands: list[list[str]] = []
+
+        def runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            commands.append(list(command))
+            if command[:3] == ["kubectl", "get", "pod"]:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout='{"metadata":{"name":"cartservice-abcde"}}',
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout='pod "cartservice-abcde" deleted\n',
+                stderr="",
+            )
+
+        dispatch = ExecutionDispatch(
+            incident_id="incident-999",
+            action_id="delete_cartservice_pod",
+            action_type="delete_pod",
+            parameters={"namespace": "default", "pod": "cartservice-abcde", "deployment": "cartservice"},
+            worker_id="worker-999",
+            requested_at="2026-03-27T03:00:00+00:00",
+            allowed_tool_names=["get_pod_context", "delete_pod"],
+            max_steps=3,
+        )
+        llm = _FakeExecutionAgentLLM(
+            [
+                ExecutionAgentDecision(
+                    decision_type="tool_call",
+                    tool_name="get_pod_context",
+                    arguments={"namespace": "default", "pod": "cartservice-abcde"},
+                    status="failed",
+                    summary="Inspect the Pod before deletion.",
+                ),
+                ExecutionAgentDecision(
+                    decision_type="tool_call",
+                    tool_name="delete_pod",
+                    arguments={"namespace": "default", "pod": "cartservice-abcde"},
+                    status="failed",
+                    summary="Delete the approved stateless Pod.",
+                ),
+                ExecutionAgentDecision(
+                    decision_type="finish",
+                    tool_name="",
+                    arguments={},
+                    status="succeeded",
+                    summary="Deleted the unhealthy Pod successfully.",
+                ),
+            ]
+        )
+
+        result = execute_dispatch(
+            dispatch,
+            kubernetes_client=KubernetesClient(runner=runner),
+            llm=llm,
+        )
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.tool_transcript[0]["tool_name"], "get_pod_context")
+        self.assertEqual(result.tool_transcript[1]["tool_name"], "delete_pod")
+        self.assertEqual(
+            commands,
+            [
+                ["kubectl", "get", "pod", "cartservice-abcde", "-n", "default", "-o", "json"],
+                ["kubectl", "delete", "pod", "cartservice-abcde", "-n", "default"],
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
